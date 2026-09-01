@@ -96,7 +96,23 @@
  *      collapsed-by-default warnings fold, locale-following cards), and
  *      the apply disposer releases the slot entry AND the scoped style
  *      tag (a re-apply after dispose re-injects idempotently);
- *   7. the schemastery resolver, when a real harness is present on this
+ *   8. summon tools (ticket #10) against a mocked tools/subagents/prompt
+ *      seam over a dedicated scan fixture (the sister plugin's mock
+ *      approach, this ticket's new build): the four-name deny list and its
+ *      registry intersection (sister names dropped when absent — the
+ *      core's tools.restrict throws on unknown names), expert resolution
+ *      over the CURRENT scan table through the shared catalog (exact /
+ *      case-insensitive / en / zh / substring / ambiguous / missing),
+ *      task validation, the summonable set = the install overlay's
+ *      installed set (hand-written wb-* roster manifests), start
+ *      parameters (label, prompt blocks, parent, signal, the COMPLETE
+ *      scan-card persona verbatim, the deny list), failure mapping
+ *      (stopReason + diagnostic + partial output, run still disposed),
+ *      provider capability gates, both tool descriptions guiding
+ *      list-first, the zh/en message dicts aligned, child sessions
+ *      getting an empty prompt section, and the mount disposer dropping
+ *      every registration;
+ *   9. the schemastery resolver, when a real harness is present on this
  *      machine, hands back a usable factory (skipped silently otherwise —
  *      this section reports, it never gates).
  *
@@ -139,7 +155,9 @@ const indexText = readFileSync(join(root, 'src', 'index.js'), 'utf8')
 assert.ok(indexText.includes("ctx.inject(['settings']"), 'settings segment declared')
 assert.ok(indexText.includes("ctx.inject(['webServer', 'agentPresets', 'settings']"),
   'routes segment declared with its three services')
-assert.ok(!indexText.includes("from './summon.js'"), 'P3 summon segment not shipped early')
+assert.ok(indexText.includes("ctx.inject(['tools', 'subagents', 'systemPrompt', 'agentPresets']"),
+  'summon segment declared with its four services (ticket #10)')
+assert.ok(indexText.includes("from './summon.js'"), 'summon segment wired to src/summon.js')
 
 // ── 2. scanner: constants, tilde rules, missing root ─────────────────────────
 
@@ -2496,7 +2514,429 @@ offAgain()
 assert.equal(slotEntries.length, 0)
 assert.equal(styleTags.length, 0)
 
-// ── 7. schemastery resolver (reporting, never gating) ────────────────────────
+// ── 8. summon tools (ticket #10) against mocked tools/subagents seams ───────
+//
+// The mock reprises the sister plugin's summon technique: a captured
+// tools/systemPrompt registry, a recording subagents seam, and a roster of
+// hand-written wb-* preset directories with REAL fingerprint manifests —
+// so the summonable-set classification runs through the production
+// installedMarketState, not a stub. The scan table itself is REAL: a
+// dedicated fixture scanned through a real catalog cache.
+
+const {
+  LIST_TOOL, SUMMON_TOOL, SUMMON_TOOL_NAMES, TASK_MAX_CHARS,
+  currentRawSourcePath, mountWorkbuddySummon, normalizeTask, resolveSummonExpert,
+  summonableCards,
+} = await import(join(root, 'src', 'summon.js'))
+
+assert.equal(LIST_TOOL, 'workbuddy_experts')
+assert.equal(SUMMON_TOOL, 'summon_workbuddy_expert')
+assert.deepEqual(SUMMON_TOOL_NAMES,
+  ['workbuddy_experts', 'summon_workbuddy_expert', 'market_experts', 'summon_market_expert'],
+  'the deny list names BOTH markets (design §6 recursion guard)')
+assert.equal(TASK_MAX_CHARS, 8000)
+
+// zh/en message parity is proven behaviorally: every failure path below
+// asserts its zh wording, and the en-locale list render exercises the EN
+// dict end to end.
+
+// Dedicated scan fixture: four solo experts with distinct zh names — two
+// share the 架构 substring (the ambiguity probe).
+const summonRoot = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-summon-'))
+const summonWrite = (relative, content) => {
+  const path = join(summonRoot, relative)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, content)
+}
+const summonExpert = (plugin, id, zhName, description, personaMark, enName) => {
+  summonWrite(`${plugin}/agents/${id}.md`, [
+    '---',
+    `name: ${id}`,
+    `description: ${description}`,
+    ...(enName === undefined ? [] : ['displayName:', `  en: "${enName}"`]),
+    '---',
+    '',
+    `${personaMark}`,
+    '',
+  ].join('\n'))
+  summonWrite(`${plugin}/.codebuddy-plugin/plugin.json`,
+    JSON.stringify({ name: plugin, profession: { zh: zhName } }))
+}
+summonExpert('alpha-plugin', 'alpha-solo', '后端架构师', 'Use when designing APIs.', '阿尔法专家正文标记。', 'Alpha Solo')
+summonExpert('beta-plugin', 'beta-solo', '容器专家', 'Use when containerizing workloads.', '贝塔专家正文标记。')
+summonExpert('gamma-plugin', 'gamma-solo', '前端架构师', 'Use when building UI.', '伽马专家正文标记。')
+summonExpert('delta-plugin', 'delta-solo', '数据专家', 'Use when modeling data.', '德尔塔专家正文标记。')
+
+const summonScan = await scanWorkbuddyRoot(summonRoot)
+assert.deepEqual(summonScan.experts.map((expert) => expert.id),
+  ['alpha-solo', 'beta-solo', 'delta-solo', 'gamma-solo'],
+  'the summon fixture scans four cards (scenario anchor)')
+assert.equal(summonScan.experts.find((expert) => expert.id === 'alpha-solo').zhName, '后端架构师')
+
+// The summon-side roster: hand-written wb-* preset directories with real
+// fingerprint manifests naming THIS source (installedMarketState reads
+// them for the classification), plus foreign-prefix entries that must be
+// ignored. alpha installed; beta/gamma/delta not.
+const summonRosterDir = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-summon-roster-'))
+function makeSummonRoster(ids) {
+  const entries = [{ id: 'standard', trust: 'system', path: join(summonRosterDir, 'standard', 'agent.cordis.yml') }]
+  for (const id of ids) {
+    const dir = join(summonRosterDir, `wb-${id}`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'agent.cordis.yml'), '# composition\n')
+    writeFileSync(join(dir, MANIFEST_FILE), JSON.stringify({
+      sourcePath: summonRoot, pluginDir: `${id}-plugin`, agentFile: `${id}.md`,
+      fingerprint: '0'.repeat(64), importedAt: '2025-01-01T00:00:00.000Z',
+    }))
+    entries.push({ id: `wb-${id}`, trust: 'user', path: join(dir, 'agent.cordis.yml') })
+  }
+  entries.push({ id: 'expert-alpha-solo', trust: 'user', path: '/nowhere/agent.cordis.yml' })
+  return { async list() { return entries } }
+}
+const alphaRoster = makeSummonRoster(['alpha-solo'])
+
+// summonableCards: exactly the overlay's installed set — foreign prefixes
+// ignored, uninstalled experts out, broken/manifest-less nuance documented
+// in the module comment.
+{
+  const cards = await summonableCards(alphaRoster, summonRoot, summonScan.experts)
+  assert.deepEqual(cards.map((card) => card.id), ['alpha-solo'],
+    'summonable set = roster wb-* installed from THIS source (overlay byId)')
+}
+
+// Resolution unit checks over the real scan table.
+assert.equal(resolveSummonExpert(summonScan.experts, 'alpha-solo').id, 'alpha-solo', 'exact id resolves')
+assert.equal(resolveSummonExpert(summonScan.experts, 'ALPHA-SOLO').id, 'alpha-solo',
+  'id match is case-insensitive')
+assert.equal(resolveSummonExpert(summonScan.experts, '后端架构师').id, 'alpha-solo',
+  'exact zhName resolves (zh users paste the card title)')
+assert.equal(resolveSummonExpert(summonScan.experts, 'Alpha Solo').id, 'alpha-solo',
+  'exact English display name resolves')
+assert.equal(resolveSummonExpert(summonScan.experts, 'alpha solo').id, 'alpha-solo',
+  'name match is case-insensitive')
+assert.equal(resolveSummonExpert(summonScan.experts, 'beta').id, 'beta-solo',
+  'unique id substring resolves')
+assert.equal(resolveSummonExpert(summonScan.experts, '容器').id, 'beta-solo',
+  'unique zhName substring resolves (fuzzy Chinese match)')
+assert.equal(resolveSummonExpert(summonScan.experts, '数据专家').id, 'delta-solo', 'another exact zhName')
+// resolveSummonExpert and normalizeTask throw SYNCHRONOUSLY: capture without
+// await (one shared trampoline, used by the blocks below).
+const capture = (fn) => { try { fn(); return null } catch (error) { return error } }
+{
+  const ambiguous = capture(() => resolveSummonExpert(summonScan.experts, '架构'))
+  assert.ok(ambiguous !== null && /歧义/.test(ambiguous.message),
+    'ambiguous zh substring rejected')
+  assert.ok(ambiguous.message.includes('alpha-solo') && ambiguous.message.includes('gamma-solo'),
+    'the ambiguity error lists the candidate ids')
+  const missing = capture(() => resolveSummonExpert(summonScan.experts, 'no-such-expert'))
+  assert.ok(missing !== null && missing.message.includes('workbuddy_experts'),
+    'not-found hints at the list tool (list-first guidance)')
+  const missingEn = capture(() => resolveSummonExpert(summonScan.experts, 'no-such-expert', 'en'))
+  assert.ok(missingEn !== null && missingEn.message.includes('workbuddy_experts'),
+    'english not-found hints at the list tool too')
+  const empty = capture(() => resolveSummonExpert(summonScan.experts, '   '))
+  assert.ok(empty !== null && /必须提供/.test(empty.message), 'empty query rejected')
+}
+
+assert.equal(normalizeTask('评审一下'), '评审一下', 'task passes through verbatim')
+assert.equal(Array.from(normalizeTask('😀'.repeat(TASK_MAX_CHARS))).length, TASK_MAX_CHARS,
+  'code-point limit counts surrogate pairs once')
+{
+  assert.ok(/不能为空/.test(capture(() => normalizeTask('  '))?.message), 'blank task rejected')
+  assert.ok(/过长/.test(capture(() => normalizeTask('😀'.repeat(TASK_MAX_CHARS + 1)))?.message),
+    'over-limit task rejected')
+}
+
+// currentRawSourcePath: optional settings, raw passthrough, default fallback.
+assert.equal(currentRawSourcePath(undefined), DEFAULT_SOURCE_PATH,
+  'no settings service → the default raw path (the summon segment never depends on settings)')
+assert.equal(currentRawSourcePath({ get: () => undefined }), DEFAULT_SOURCE_PATH,
+  'namespace not registered yet → the default raw path')
+assert.equal(currentRawSourcePath({ get: (ns) => (ns === 'workbuddy-market' ? { sourcePath: '~/kept-raw' } : undefined) }),
+  '~/kept-raw', 'the namespace value passes through RAW (tilde intact, #18)')
+
+/**
+ * Mocked injected context for mountWorkbuddySummon (sister-plugin shape):
+ * captured tool/section registrations, a recording subagents seam, a
+ * configurable roster, optional settings (locale + source namespace), and
+ * a tool-registry view whose `get` decides which deny names exist.
+ */
+function makeSummonCtx(options = {}) {
+  const registeredTools = []
+  const sections = []
+  const starts = []
+  let disposed = 0
+  const knownToolNames = new Set([LIST_TOOL, SUMMON_TOOL, ...(options.toolNames ?? [])])
+  const ctx = {
+    registeredTools, sections, starts,
+    disposeCount: () => disposed,
+    tools: {
+      register(definition) {
+        registeredTools.push(definition)
+        return () => {
+          const index = registeredTools.indexOf(definition)
+          if (index >= 0) registeredTools.splice(index, 1)
+        }
+      },
+      get: (name) => (knownToolNames.has(name) ? { name } : undefined),
+    },
+    systemPrompt: {
+      section(spec) {
+        sections.push(spec)
+        return () => {
+          const index = sections.indexOf(spec)
+          if (index >= 0) sections.splice(index, 1)
+        }
+      },
+    },
+    subagents: {
+      getProvider: () =>
+        options.providerMissing === true
+          ? undefined
+          : (options.provider ?? { capabilities: { persona: true, toolFilter: true } }),
+      start: async (name, request) => {
+        starts.push({ name, request })
+        return {
+          result: Promise.resolve(
+            options.result ?? { stopReason: 'completed', output: [{ type: 'text', text: '专家答复' }] },
+          ),
+          dispose: async () => { disposed += 1 },
+        }
+      },
+    },
+    agentPresets: options.roster ?? { async list() { return [] } },
+    get: (serviceName) => (serviceName === 'settings' ? options.settings : undefined),
+  }
+  return ctx
+}
+
+const summonCatalog = createCatalog()
+const summonSettings = {
+  get: (ns) => (ns === SETTINGS_NS ? { sourcePath: summonRoot } : undefined),
+}
+const execStub = { agent: { id: 'parent-agent' }, signal: new AbortController().signal }
+
+// Mount: two tools + one section; child sessions see ''.
+const summonCtx = makeSummonCtx({
+  roster: alphaRoster,
+  settings: summonSettings,
+  toolNames: ['market_experts', 'summon_market_expert'],
+})
+const offSummon = mountWorkbuddySummon(summonCtx, { catalog: summonCatalog })
+assert.deepEqual(summonCtx.registeredTools.map((tool) => tool.name).sort(), [SUMMON_TOOL, LIST_TOOL],
+  'both summon tools registered')
+assert.equal(summonCtx.sections.length, 1, 'one prompt section registered')
+assert.equal(summonCtx.sections[0].name, 'workbuddy-market:summon')
+assert.equal(summonCtx.sections[0].order, 117)
+assert.equal(
+  summonCtx.sections[0].text({ agent: { session: { header: { parentSession: 'child' } } } }),
+  '',
+  'child sessions get an empty section (no recursive summoning)',
+)
+{
+  const parentText = summonCtx.sections[0].text({})
+  assert.ok(parentText.includes(SUMMON_TOOL) && parentText.includes(LIST_TOOL),
+    'parent sessions are taught both tools')
+  assert.ok(parentText.includes('WorkBuddy 专家'), 'the section names the install surface')
+}
+
+const summonListTool = summonCtx.registeredTools.find((tool) => tool.name === LIST_TOOL)
+const summonRunTool = summonCtx.registeredTools.find((tool) => tool.name === SUMMON_TOOL)
+
+// Tool descriptions guide list-first (acceptance: 先列后召).
+assert.ok(summonListTool.description.includes('summon_workbuddy_expert')
+  && summonListTool.description.includes('BEFORE'),
+'the list tool description points at the summon tool, list-first')
+assert.ok(summonRunTool.description.includes('workbuddy_experts')
+  && /first/.test(summonRunTool.description),
+'the summon tool description points back at the list tool')
+assert.ok(summonRunTool.description.includes('Chinese name'),
+  'the summon tool documents zhName matching')
+
+// List tool over the real scan + real roster classification.
+{
+  const listed = await summonListTool.execute({}, execStub)
+  assert.deepEqual(
+    { total: listed.total, ids: listed.experts.map((expert) => expert.id) },
+    { total: 1, ids: ['alpha-solo'] },
+    'list tool returns exactly the installed (summonable) experts',
+  )
+  const alpha = listed.experts[0]
+  assert.equal(alpha.zhName, '后端架构师')
+  assert.equal(alpha.description, 'Use when designing APIs.')
+  assert.equal(alpha.zhDescription, '', 'no plugin.json displayDescription → empty string, base survives')
+  const text = summonListTool.output.render({}, listed)[0].text
+  assert.ok(text.includes('alpha-solo') && text.includes('后端架构师'),
+    'zh list render shows id + zhName')
+}
+
+// Empty roster → the actionable empty message (zh default).
+{
+  const emptyCtx = makeSummonCtx({ settings: summonSettings })
+  mountWorkbuddySummon(emptyCtx, { catalog: createCatalog() })
+  const emptyListTool = emptyCtx.registeredTools.find((tool) => tool.name === LIST_TOOL)
+  const emptyListed = await emptyListTool.execute({}, execStub)
+  assert.deepEqual(emptyListed, { experts: [], total: 0 }, 'no installs → empty list')
+  assert.ok(emptyListTool.output.render({}, emptyListed)[0].text.includes('WorkBuddy 专家'),
+    'the empty render points at the market settings page')
+}
+
+// English host locale: en render + base fields.
+{
+  const enCtx = makeSummonCtx({
+    roster: alphaRoster,
+    settings: { get: (ns) => (ns === 'locale' ? { preference: 'en' } : ns === SETTINGS_NS ? { sourcePath: summonRoot } : undefined) },
+  })
+  mountWorkbuddySummon(enCtx, { catalog: createCatalog() })
+  const enListTool = enCtx.registeredTools.find((tool) => tool.name === LIST_TOOL)
+  const enListed = await enListTool.execute({}, execStub)
+  assert.equal(enListed.experts[0].zhName, '后端架构师', 'canonical value carries zhName regardless of locale')
+  const text = enListTool.output.render({}, enListed)[0].text
+  assert.ok(text.includes('alpha-solo') && text.includes('Use when designing APIs.'),
+    'en render shows the base description')
+}
+
+// Not-installed expert → the install-first error.
+await assert.rejects(
+  () => summonRunTool.execute({ expert: 'beta-solo', task: '评审一下' }, execStub),
+  /WorkBuddy 专家/,
+  'uninstalled expert → error tells the user to install it first',
+)
+await assert.rejects(
+  () => summonRunTool.execute({ expert: 'alpha-solo', task: 'x' }, {}),
+  /需要由智能体/,
+  'missing calling agent rejected',
+)
+await assert.rejects(
+  () => summonRunTool.execute({ expert: 'alpha-solo', task: '   ' }, execStub),
+  /不能为空/,
+  'blank task rejected through execute',
+)
+await assert.rejects(
+  () => summonRunTool.execute({ expert: 'alpha-solo', task: 'x'.repeat(TASK_MAX_CHARS + 1) }, execStub),
+  /过长/,
+  'over-limit task rejected through execute',
+)
+await assert.rejects(
+  () => summonRunTool.execute({ expert: '', task: 'x' }, execStub),
+  /必须提供/,
+  'missing expert argument rejected inside execute (hand-written definition)',
+)
+
+// Successful summon by zhName: the start parameters carry the COMPLETE
+// persona verbatim and the four-name deny list; the run is disposed.
+{
+  const okResult = await summonRunTool.execute({ expert: '后端架构师', task: '评审 src/foo.js' }, execStub)
+  assert.deepEqual(okResult, { expert: 'alpha-solo', answer: '专家答复' })
+  assert.equal(summonCtx.starts.length, 1)
+  const start = summonCtx.starts[0]
+  assert.deepEqual(Object.keys(start.request).sort(),
+    ['label', 'parent', 'persona', 'prompt', 'signal', 'toolFilter'],
+    'the start request carries ONLY the designed options — no preset mount, no customSkillDirs (summon mode never touches the packaged skills)')
+  assert.equal(start.name, 'spawn', 'uses the spawn provider')
+  assert.equal(start.request.label, 'wb-expert:alpha-solo')
+  assert.deepEqual(start.request.prompt, [{ type: 'text', text: '评审 src/foo.js' }])
+  assert.equal(start.request.parent, execStub.agent, 'parent agent forwarded')
+  assert.equal(start.request.signal, execStub.signal, 'cancellation signal forwarded')
+  assert.equal(start.request.persona, summonScan.experts.find((expert) => expert.id === 'alpha-solo').persona,
+    'the COMPLETE scan-card persona is passed verbatim')
+  assert.deepEqual([...start.request.toolFilter.deny], SUMMON_TOOL_NAMES,
+    'all four summon tool names denied in the child (both markets)')
+  assert.equal(summonCtx.disposeCount(), 1, 'run disposed exactly once')
+  assert.equal(summonRunTool.output.render({}, okResult)[0].text, '专家答复', 'render surfaces the answer')
+}
+
+// Registry intersection: without the sister plugin's names in the registry
+// the deny list shrinks to this plugin's two — the core's tools.restrict()
+// throws on unknown names, so verbatim four would fail every child start.
+{
+  const soloCtx = makeSummonCtx({ roster: alphaRoster, settings: summonSettings })
+  mountWorkbuddySummon(soloCtx, { catalog: createCatalog() })
+  const soloTool = soloCtx.registeredTools.find((tool) => tool.name === SUMMON_TOOL)
+  await soloTool.execute({ expert: 'alpha-solo', task: 'x' }, execStub)
+  assert.deepEqual([...soloCtx.starts[0].request.toolFilter.deny], [LIST_TOOL, SUMMON_TOOL],
+    'sister-market names absent from the registry → dropped from the deny list')
+}
+
+// Failure mapping: a non-completed run becomes a tool error carrying the
+// stop reason, diagnostic, and partial output — and is still disposed.
+{
+  const failCtx = makeSummonCtx({
+    roster: alphaRoster,
+    settings: summonSettings,
+    result: { stopReason: 'error', diagnostic: 'provider boom', output: [{ type: 'text', text: '部分输出' }] },
+  })
+  mountWorkbuddySummon(failCtx, { catalog: createCatalog() })
+  const failTool = failCtx.registeredTools.find((tool) => tool.name === SUMMON_TOOL)
+  await assert.rejects(
+    () => failTool.execute({ expert: 'alpha-solo', task: 'x' }, execStub),
+    (error) => {
+      const text = String(error.message)
+      return text.includes('error') && text.includes('provider boom') && text.includes('部分输出')
+    },
+    'failure carries stop reason, diagnostic, and partial output',
+  )
+  assert.equal(failCtx.disposeCount(), 1, 'failed run disposed too')
+
+  const abortCtx = makeSummonCtx({
+    roster: alphaRoster,
+    settings: summonSettings,
+    result: { stopReason: 'aborted', output: [] },
+  })
+  mountWorkbuddySummon(abortCtx, { catalog: createCatalog() })
+  await assert.rejects(
+    () => abortCtx.registeredTools.find((tool) => tool.name === SUMMON_TOOL)
+      .execute({ expert: 'alpha-solo', task: 'x' }, execStub),
+    /aborted/,
+    'a bare non-completed reason still maps to an error',
+  )
+}
+
+// Provider capability gates.
+{
+  const noPersonaCtx = makeSummonCtx({
+    roster: alphaRoster,
+    settings: summonSettings,
+    provider: { capabilities: { persona: false, toolFilter: true } },
+  })
+  mountWorkbuddySummon(noPersonaCtx, { catalog: createCatalog() })
+  await assert.rejects(
+    () => noPersonaCtx.registeredTools.find((tool) => tool.name === SUMMON_TOOL)
+      .execute({ expert: 'alpha-solo', task: 'x' }, execStub),
+    /人格/,
+    'provider without persona capability rejected',
+  )
+  const noFilterCtx = makeSummonCtx({
+    roster: alphaRoster,
+    settings: summonSettings,
+    provider: { capabilities: { persona: true, toolFilter: false } },
+  })
+  mountWorkbuddySummon(noFilterCtx, { catalog: createCatalog() })
+  await assert.rejects(
+    () => noFilterCtx.registeredTools.find((tool) => tool.name === SUMMON_TOOL)
+      .execute({ expert: 'alpha-solo', task: 'x' }, execStub),
+    /递归/,
+    'provider without toolFilter capability rejected (recursion guard impossible)',
+  )
+  const noProviderCtx = makeSummonCtx({ roster: alphaRoster, settings: summonSettings, providerMissing: true })
+  mountWorkbuddySummon(noProviderCtx, { catalog: createCatalog() })
+  await assert.rejects(
+    () => noProviderCtx.registeredTools.find((tool) => tool.name === SUMMON_TOOL)
+      .execute({ expert: 'alpha-solo', task: 'x' }, execStub),
+    /未注册/,
+    'missing provider rejected',
+  )
+}
+
+// The mount disposer drops every side effect.
+offSummon()
+assert.equal(summonCtx.registeredTools.length, 0, 'tools unregistered')
+assert.equal(summonCtx.sections.length, 0, 'prompt section unregistered')
+
+rmSync(summonRosterDir, { recursive: true, force: true })
+rmSync(summonRoot, { recursive: true, force: true })
+
+// ── 9. schemastery resolver (reporting, never gating) ────────────────────────
 
 const { resolveSchemastery } = await import(join(root, 'src', 'schemastery.js'))
 try {

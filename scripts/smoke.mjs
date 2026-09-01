@@ -1,17 +1,33 @@
 /**
- * Offline smoke checks for dsh-workbuddy-market (T1 walking skeleton) — no
- * browser, no live profile, zero dependencies: `node scripts/smoke.mjs`.
+ * Offline smoke checks for dsh-workbuddy-market — no browser, no live
+ * profile, zero dependencies: `node scripts/smoke.mjs`.
  *
  *   1. package contract: manifest shape (dsh.bundle.patch, dsh.client),
  *      every exports target exists, patch layer + host orchestration wire
  *      up as files;
- *   2. scanner placeholder: empty expert table, default raw path, tilde
- *      expansion rules (decision #18);
+ *   2. scanner: default raw path, tilde expansion rules (decision #18),
+ *      missing root → empty table with no scanner warning;
+ *   2b. scanner over the full pathology fixture (ticket #3): two solo
+ *      experts (one with skills + rules + PNG + template variables; one
+ *      fully CRLF with plugin.json metadata and a dangling avatar
+ *      reference), a three-agent team (one member CRLF and without
+ *      frontmatter displayName, every member with its own PNG plus
+ *      team.png), a `git:` copy of the team, a cross-plugin duplicate-id
+ *      pair, a corrupt-plugin.json directory, and a skills subdirectory
+ *      without SKILL.md — asserting every offline-checkable acceptance
+ *      item (team split + per-member avatars, rules appended into the
+ *      persona, template escaping via the registered-variable whitelist,
+ *      CRLF tolerance with `\r`-free personas, plugin.json priority with
+ *      dangling-avatar fallback, README zhDescription fallback, duplicate
+ *      id first-wins + warning, broken-directory degradation, verbatim
+ *      skills copying, undefined avatarPath for PNG-less experts, and the
+ *      body-H1 zhName extension);
  *   3. catalog cache: cached per source path, invalidated explicitly;
  *   4. settings mount against a fake settings service + fake schemastery:
  *      base default, raw-string storage, watcher invalidates the catalog;
  *   5. routes over a fake webServer with duck-typed request/response:
- *      /api/state shape + no-store, /api/config (save, tilde passthrough,
+ *      /api/state shape + no-store (including a full state over the
+ *      pathology fixture), /api/config (save, tilde passthrough,
  *      nonexistent path allowed, revision conflict 409, validation),
  *      /api/refresh, 405/403 rejection, the 4 KiB body cap, the mutating
  *      single-flight lane (concurrent second change → 409), and full
@@ -27,9 +43,9 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
 
 const root = new URL('..', import.meta.url).pathname
@@ -59,21 +75,363 @@ assert.ok(indexText.includes("ctx.inject(['webServer', 'agentPresets', 'settings
   'routes segment declared with its three services')
 assert.ok(!indexText.includes("from './summon.js'"), 'P3 summon segment not shipped early')
 
-// ── 2. scanner placeholder ───────────────────────────────────────────────────
+// ── 2. scanner: constants, tilde rules, missing root ─────────────────────────
 
-const { DEFAULT_SOURCE_PATH, expandTildePath, scanWorkbuddyRoot } =
-  await import(join(root, 'src', 'scanner.js'))
+const scannerModule = await import(join(root, 'src', 'scanner.js'))
+const { DEFAULT_SOURCE_PATH, expandTildePath, scanWorkbuddyRoot } = scannerModule
+const { REGISTERED_PROMPT_VARIABLES, escapeUnregisteredTemplateGroups } = scannerModule
 
 assert.equal(DEFAULT_SOURCE_PATH, '~/.workbuddy/plugins/marketplaces/experts/plugins',
   'default source path is the raw tilde string (#18)')
+assert.ok(Array.isArray(REGISTERED_PROMPT_VARIABLES) && REGISTERED_PROMPT_VARIABLES.includes('model'),
+  'the escape whitelist is data (a constant array), not scattered literals')
+
+/** Complete {{…}} group names in a persona — the sister-plugin assertion shape. */
+const templateGroupsOf = (text) => [...text.matchAll(/\{\{([^{}]*)\}\}/g)].map((match) => match[1])
+
 assert.deepEqual(await scanWorkbuddyRoot('/definitely/not/scanned/yet'),
-  { experts: [], warnings: [] }, 'T1 scanner is an empty-table placeholder')
+  { experts: [], warnings: [] },
+  'missing root → empty table with NO scanner warning (the state layer owns the pathExists warning)')
 
 assert.equal(expandTildePath('~'), homedir(), 'bare tilde expands')
 assert.equal(expandTildePath('~/plugins'), join(homedir(), 'plugins'), 'tilde prefix expands')
 assert.equal(expandTildePath('/absolute/path'), '/absolute/path', 'absolute path untouched')
 assert.equal(expandTildePath('~foo/bar'), '~foo/bar', 'other-user tilde untouched')
 assert.equal(expandTildePath('relative'), 'relative', 'relative path untouched')
+
+// Template-escape unit checks: the whitelist survives, everything else splits.
+{
+  const escaped = escapeUnregisteredTemplateGroups(
+    'keep {{model}} and {{provider}}; split {{ y: -2 }}, {{.CurrentDate}}, {{ cwd }}, {{bogus}}, {{ {a:1} }}, {{{ ninja }}}',
+  )
+  const groups = templateGroupsOf(escaped)
+  assert.deepEqual([...new Set(groups)].sort(), ['model', 'provider'],
+    'only registered variables remain as complete groups (sister-plugin assertion technique)')
+  assert.ok(escaped.includes('{ { y: -2 }}') && escaped.includes('{ {.CurrentDate}}'),
+    'non-registered groups are split at the opening braces')
+  assert.ok(!escaped.includes('{{ {'), 'nested-brace groups never survive whole')
+  // A lone `{{` with no closing braces anywhere is literal prose for the host
+  // interpolator and must pass through untouched.
+  assert.equal(escapeUnregisteredTemplateGroups('a {{ lonely opener'), 'a {{ lonely opener',
+    'lone `{{` without any `}}` stays literal')
+}
+
+// ── 2b. scanner over the pathology fixture (ticket #3) ──────────────────────
+
+const fixtureRoot = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-scan-'))
+const FIXTURE_PNG = Buffer.from('89504e470d0a1a0a-fixture-png')
+
+/** Write one fixture file, creating parent directories as needed. */
+function fixtureWrite(relative, content) {
+  const path = join(fixtureRoot, relative)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, content)
+}
+
+// Solo expert #1: skills (one subdir WITHOUT SKILL.md) + rules + PNG +
+// template variables + full plugin.json metadata.
+fixtureWrite('solo-one/agents/solo-one.md', [
+  '---',
+  'name: solo-one',
+  'description: Use when asked to review code paths end to end.',
+  'displayName:',
+  '  en: "Solo One"',
+  '  zh: "独奏一号"',
+  'profession:',
+  '  en: "Solo Review Expert"',
+  '  zh: "评审专家"',
+  'maxTurns: 50',
+  '---',
+  '',
+  '# 评审专家',
+  '',
+  '模板变量 {{model}} 与 {{provider}} 已注册，保留原样。',
+  '未注册组必须拆括号：{{ y: -2 }}、{{ github.sha }}、{{ t(\'welcome\') }}、{{ cwd }}（带空格同样未注册）。',
+  '系统时间变量 {{.CurrentDate}} 与嵌套大括号 {{ {a:1} }}、三连 {{{ ninja }}} 都不允许让插值器抛错。',
+  '',
+].join('\n'))
+fixtureWrite('solo-one/rules/quality.md', [
+  '---',
+  'description: quality gate',
+  'alwaysApply: true',
+  '---',
+  '',
+  '规则正文：所有输出必须自证。模板组 {{ item.name }} 出现在规则文件里也要被转义。',
+  '',
+].join('\n'))
+fixtureWrite('solo-one/skills/main-skill/SKILL.md', 'SKILL: main\n')
+fixtureWrite('solo-one/skills/references/data.md', 'reference data with no SKILL.md\n')
+fixtureWrite('solo-one/avatars/solo-one.png', FIXTURE_PNG)
+fixtureWrite('solo-one/.codebuddy-plugin/plugin.json', JSON.stringify({
+  name: 'solo-one',
+  profession: { en: 'Solo Review Expert', zh: '评审专家' },
+  displayDescription: { en: 'English display', zh: '来自 plugin.json 的中文描述。' },
+  avatar: 'avatars/solo-one.png',
+  categoryId: '02-Engineering',
+  tags: [{ en: 'Review', zh: '评审' }],
+}))
+
+// Solo expert #2: every file CRLF, frontmatter without displayName/profession
+// (zhName must come from plugin.json profession.zh), plugin.json with a
+// DANGLING avatar reference (falls back to the first PNG).
+const crlf = (text) => text.split('\n').join('\r\n')
+fixtureWrite('solo-two/agents/solo-two.md', crlf([
+  '---',
+  'name: solo-two',
+  'description: Use when asked to containerize workloads.',
+  '---',
+  '',
+  '# 容器器（Dockerfile 生成专家）',
+  '',
+  'CRLF 正文第一行。多阶段构建与镜像瘦身是本职。\r',
+  '第二行同样以 CRLF 结尾，抽取后不得残留 \\r。',
+  '',
+].join('\n')))
+fixtureWrite('solo-two/avatars/actual.png', FIXTURE_PNG)
+fixtureWrite('solo-two/.codebuddy-plugin/plugin.json', crlf(JSON.stringify({
+  name: 'solo-two',
+  profession: { en: 'Container Expert', zh: '容器专家' },
+  displayDescription: { en: 'English display', zh: 'CRLF plugin.json 的中文描述。' },
+  avatar: 'avatars/ghost-does-not-exist.png',
+}, null, 2)))
+
+// Three-agent team: every member owns <agentName>.png, team.png exists, one
+// member is CRLF without frontmatter displayName (zhName from profession.zh),
+// plugin.json has NO displayDescription (zhDescription falls back to README).
+fixtureWrite('team-x/agents/team-x-lead.md', [
+  '---',
+  'name: team-x-lead',
+  'description: Lead of the fixture team.',
+  'displayName:',
+  '  en: "Lead Person"',
+  '  zh: "队长甲"',
+  'profession:',
+  '  en: "Team Lead"',
+  '  zh: "队长"',
+  '---',
+  '',
+  '# 队长',
+  '',
+  '统筹全局。',
+].join('\n'))
+fixtureWrite('team-x/agents/team-x-maker.md', crlf([
+  '---',
+  'name: team-x-maker',
+  'description: Maker of the fixture team.',
+  'profession:',
+  '  en: "Maker"',
+  '  zh: "制造工程师"',
+  '---',
+  '',
+  '# 制造',
+  '',
+  'CRLF 成员正文，没有 frontmatter displayName。',
+].join('\n')))
+fixtureWrite('team-x/agents/team-x-checker.md', [
+  '---',
+  'name: team-x-checker',
+  'description: Checker of the fixture team.',
+  'displayName:',
+  '  en: "Checker Person"',
+  '  zh: "质检乙"',
+  'profession:',
+  '  en: "Checker"',
+  '  zh: "质检员"',
+  '---',
+  '',
+  '# 质检',
+  '',
+  '把关交付。',
+].join('\n'))
+for (const member of ['team-x-lead', 'team-x-maker', 'team-x-checker', 'team']) {
+  fixtureWrite(`team-x/avatars/${member}.png`, FIXTURE_PNG)
+}
+fixtureWrite('team-x/README.md', [
+  '# 团队插件',
+  '',
+  'README 首段中文兜底描述：无 displayDescription 时 zhDescription 取自这里。',
+  '',
+  '## 后文',
+  '',
+  '不取。',
+].join('\n'))
+fixtureWrite('team-x/.codebuddy-plugin/plugin.json', JSON.stringify({
+  name: 'team-x',
+  expertType: 'team',
+  agentName: 'team-x-lead',
+  teamInfo: { leadAgent: 'team-x-lead', memberAgents: ['team-x-maker', 'team-x-checker'] },
+  profession: { en: 'Fixture Team', zh: '夹具团队' },
+}))
+
+// A `git:`-prefixed duplicate-install copy of the team — skipped whole.
+for (const file of ['agents/team-x-lead.md', 'agents/team-x-maker.md', 'agents/team-x-checker.md']) {
+  fixtureWrite(`git:team-x:team-x-lead/${file}`, readFileSync(join(fixtureRoot, 'team-x', file)))
+}
+fixtureWrite('git:team-x:team-x-lead/.codebuddy-plugin/plugin.json',
+  readFileSync(join(fixtureRoot, 'team-x', '.codebuddy-plugin', 'plugin.json')))
+
+// Cross-plugin duplicate-id pair: alpha wins (name-sorted first), zeta is
+// skipped with a warning. Alpha also carries the body-H1 zhName case (no
+// Chinese metadata anywhere else) and no PNGs at all.
+fixtureWrite('alpha-dup/agents/one.md', [
+  '---',
+  'name: dup-expert',
+  'description: First definition of the shared id.',
+  '---',
+  '',
+  '# 阿尔法（重复名专家）',
+  '',
+  '胜者正文。',
+].join('\n'))
+fixtureWrite('alpha-dup/.codebuddy-plugin/plugin.json', JSON.stringify({ name: 'alpha-dup' }))
+fixtureWrite('zeta-dup/agents/one.md', [
+  '---',
+  'name: dup-expert',
+  'description: Second definition of the shared id.',
+  '---',
+  '',
+  '# 失败者',
+  '',
+  '败者正文。',
+].join('\n'))
+fixtureWrite('zeta-dup/.codebuddy-plugin/plugin.json', JSON.stringify({ name: 'zeta-dup' }))
+
+// Broken plugin directory: corrupt plugin.json → skipped with a warning.
+fixtureWrite('broken-one/agents/has-agent.md', '---\nname: broken-one-agent\ndescription: x\n---\n\n正文。\n')
+fixtureWrite('broken-one/.codebuddy-plugin/plugin.json', '{ not json')
+
+// Agents without a plugin.json: a broken plugin (manifest missing, #17).
+fixtureWrite('no-manifest/agents/orphan.md', '---\nname: orphan-expert\ndescription: x\n---\n\n正文。\n')
+
+// A foreign directory (neither agents nor manifest): invisible, no warning.
+fixtureWrite('foreign-dir/notes.txt', 'not a WorkBuddy plugin\n')
+
+// Terminal-fallback card: English-only metadata (displayName.en, non-Han
+// H1, no zh anywhere) — zhName must fall back to the card's English base
+// NAME (displayName.en), never to the bare id.
+fixtureWrite('solo-three/agents/solo-three.md', [
+  '---',
+  'name: solo-three',
+  'description: Use when asked to check the terminal fallback.',
+  'displayName:',
+  '  en: "Solo Three"',
+  '---',
+  '',
+  '# Plain English Title',
+  '',
+  'No Chinese metadata anywhere.',
+].join('\n'))
+fixtureWrite('solo-three/.codebuddy-plugin/plugin.json', JSON.stringify({ name: 'solo-three' }))
+
+const scan = await scanWorkbuddyRoot(fixtureRoot)
+const byId = new Map(scan.experts.map((expert) => [expert.id, expert]))
+
+// Card inventory: 2 solo + 1 fallback probe + 3 team + 1 duplicate winner —
+// git: copy invisible, zeta-dup dropped by first-wins, broken/no-manifest
+// degraded.
+assert.deepEqual(scan.experts.map((expert) => expert.id), [
+  'dup-expert', 'solo-one', 'solo-three', 'solo-two', 'team-x-checker', 'team-x-lead', 'team-x-maker',
+].sort(), 'exactly the seven surviving cards, in deterministic order')
+assert.equal(scan.experts.filter((expert) => expert.pluginDir.startsWith('git:')).length, 0,
+  'git: copy contributes no card at all')
+assert.equal(scan.experts.filter((expert) => expert.pluginDir === 'zeta-dup').length, 0,
+  'duplicate loser is invisible')
+
+// Warnings: duplicate id + broken/corrupt directories — and nothing else.
+assert.equal(scan.warnings.filter((warning) => warning.includes('duplicate expert id "dup-expert"')).length, 1,
+  'duplicate id reported once, first-wins')
+assert.equal(scan.warnings.filter((warning) => warning.startsWith('broken-one:')).length, 1,
+  'corrupt plugin.json degrades to one plugin-level warning without failing the scan')
+assert.equal(scan.warnings.filter((warning) => warning.startsWith('no-manifest:')).length, 1,
+  'agents without plugin.json degrade to one "manifest missing" warning (#17)')
+assert.ok(scan.warnings.some((warning) => warning.startsWith('no-manifest:') && warning.includes('plugin.json missing')),
+  'the missing-manifest warning names the cause')
+assert.deepEqual(
+  scan.warnings.filter((warning) => !warning.includes('dup-expert')
+    && !warning.startsWith('broken-one:') && !warning.startsWith('no-manifest:')),
+  [], 'no other warnings — git: copies and foreign directories stay silent')
+
+// Solo #1: plugin.json priority, skills verbatim, rules appended, escaping.
+{
+  const soloOne = byId.get('solo-one')
+  assert.equal(soloOne.name, 'Solo One', 'name ← frontmatter displayName.en')
+  assert.equal(soloOne.zhName, '评审专家', 'zhName ← plugin.json profession.zh (single card, #12)')
+  assert.equal(soloOne.zhDescription, '来自 plugin.json 的中文描述。', 'zhDescription ← plugin.json displayDescription.zh')
+  assert.ok(soloOne.avatarPath.endsWith(join('solo-one', 'avatars', 'solo-one.png')),
+    'avatarPath ← plugin.json avatar (existence-checked)')
+  assert.deepEqual(soloOne.skills, ['main-skill', 'references'],
+    'skills copies every subdirectory verbatim, including the one without SKILL.md (#15)')
+  assert.equal(soloOne.teamSize, 1)
+  assert.ok(soloOne.persona.includes('# 附加规则：rules/quality.md'), 'rules are appended under a title')
+  assert.ok(soloOne.persona.includes('所有输出必须自证'), 'rule body lands in the persona')
+  assert.ok(!soloOne.persona.includes('\r'), 'persona never carries \\r')
+  const groups = templateGroupsOf(soloOne.persona)
+  assert.ok(groups.includes('model') && groups.includes('provider'), 'registered groups survive verbatim')
+  assert.ok(soloOne.persona.includes('{ { y: -2 }}') && soloOne.persona.includes('{ {.CurrentDate}}'),
+    'code-example groups are split at the opening braces')
+}
+
+// Solo #2: CRLF everywhere, dangling avatar fallback, zhName from plugin.json.
+{
+  const soloTwo = byId.get('solo-two')
+  assert.ok(soloTwo !== undefined, 'the CRLF expert still produces a card')
+  assert.ok(!soloTwo.persona.includes('\r'), 'CRLF persona is \\r-free (#14)')
+  assert.ok(soloTwo.persona.includes('CRLF 正文第一行'), 'CRLF body extracted past the frontmatter')
+  assert.equal(soloTwo.zhName, '容器专家', 'zhName ← plugin.json profession.zh over CRLF boundaries')
+  assert.equal(soloTwo.zhDescription, 'CRLF plugin.json 的中文描述。', 'zhDescription parsed from a CRLF plugin.json')
+  assert.ok(soloTwo.avatarPath.endsWith(join('solo-two', 'avatars', 'actual.png')),
+    'dangling avatar reference falls back to the first PNG')
+  assert.equal(soloTwo.name, 'solo-two', 'no frontmatter displayName → name falls back to the id')
+}
+
+// Team: split into per-agent cards, each member's own PNG, README fallback.
+{
+  const lead = byId.get('team-x-lead')
+  const maker = byId.get('team-x-maker')
+  const checker = byId.get('team-x-checker')
+  assert.ok(lead !== undefined && maker !== undefined && checker !== undefined, 'team splits one card per agent md')
+  for (const [id, expert] of [['team-x-lead', lead], ['team-x-maker', maker], ['team-x-checker', checker]]) {
+    assert.equal(expert.teamSize, 3, `${id}: teamSize counts the directory's agent files`)
+    assert.equal(expert.pluginDir, 'team-x')
+    assert.ok(expert.avatarPath.endsWith(join('team-x', 'avatars', `${id}.png`)),
+      `${id}: avatar hits its own <agentName>.png (never team.png / first PNG)`)
+  }
+  assert.equal(lead.zhName, '队长甲', 'team zhName ← frontmatter displayName.zh')
+  assert.equal(maker.zhName, '制造工程师',
+    'CRLF member without displayName takes zhName from frontmatter profession.zh')
+  assert.ok(!maker.persona.includes('\r'), 'CRLF member persona is \\r-free')
+  assert.equal(lead.zhDescription, 'README 首段中文兜底描述：无 displayDescription 时 zhDescription 取自这里。',
+    'zhDescription falls back to the README first non-title paragraph')
+}
+
+// Duplicate winner: body-H1 zhName extension + undefined avatarPath.
+{
+  const winner = byId.get('dup-expert')
+  assert.equal(winner.pluginDir, 'alpha-dup', 'first (name-sorted) definition wins the shared id')
+  assert.equal(winner.zhName, '重复名专家',
+    'body-H1 extension (#19): the parenthesized functional name serves when no Chinese metadata exists')
+  assert.equal(winner.avatarPath, undefined, 'PNG-less expert has no avatarPath (client emoji fallback)')
+  assert.equal(winner.name, 'dup-expert')
+}
+
+// Terminal fallback: exhausted chain lands on the card's English base NAME
+// (displayName.en), never on the bare id.
+{
+  const fallback = byId.get('solo-three')
+  assert.equal(fallback.name, 'Solo Three')
+  assert.equal(fallback.zhName, 'Solo Three',
+    'zhName terminal fallback is the `name` field (design §2), not the raw id')
+}
+
+// Every card: id shape, no \r anywhere, personas escape-checked.
+for (const expert of scan.experts) {
+  assert.match(expert.id, /^[a-z0-9][a-z0-9-]*$/, `expert id ${expert.id} conforms`)
+  assert.ok(!expert.persona.includes('\r'), `persona of ${expert.id} carries no \\r`)
+  for (const group of templateGroupsOf(expert.persona)) {
+    assert.ok(REGISTERED_PROMPT_VARIABLES.includes(group),
+      `persona of ${expert.id} keeps only registered template variables (got "{{${group}}}")`)
+  }
+}
 
 // ── 3. catalog cache ─────────────────────────────────────────────────────────
 
@@ -284,7 +642,9 @@ async function handle(route, request) {
   return { response, payload }
 }
 
-// GET /api/state: default state, no-store, cache behavior.
+// GET /api/state: default state, no-store, cache behavior. The default path
+// is the REAL WorkBuddy directory — machine-dependent — so only its shape is
+// asserted here; the deterministic table is checked against the fixture below.
 {
   const { response, payload } = await handle(stateRoute, makeRequest({ url: '/dsh-workbuddy-market/api/state' }))
   assert.equal(response.status, 200)
@@ -292,7 +652,7 @@ async function handle(route, request) {
   assert.equal(payload.sourcePath, DEFAULT_SOURCE_PATH, 'sourcePath echoes the raw default (#18)')
   assert.equal(typeof payload.pathExists, 'boolean')
   assert.equal(typeof payload.revision, 'number')
-  assert.deepEqual(payload.experts, [], 'empty expert table (T1 scanner)')
+  assert.ok(Array.isArray(payload.experts), 'experts is an array (the default path is machine-dependent)')
   assert.deepEqual(payload.orphans, [], 'orphans field ships from day one, empty until the install ticket')
   assert.ok(Array.isArray(payload.warnings))
   const scansBefore = routeScanCalls.length
@@ -343,6 +703,23 @@ const fixtureDir = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-smoke-'))
     chunks: [Buffer.from(JSON.stringify({ sourcePath: '~/kept-tilde' }))],
   }))
   assert.equal(payload.sourcePath, '~/kept-tilde', 'tilde stored and echoed verbatim, never expanded (#18)')
+}
+
+// A full state over the pathology fixture: the routes serve the real scan.
+{
+  const { response, payload } = await handle(configRoute, makeRequest({
+    method: 'POST', headers: SAME_ORIGIN,
+    chunks: [Buffer.from(JSON.stringify({ sourcePath: fixtureRoot }))],
+  }))
+  assert.equal(response.status, 200, `fixture state succeeds: ${response.body}`)
+  assert.equal(payload.pathExists, true)
+  assert.deepEqual(payload.experts.map((expert) => expert.id),
+    ['dup-expert', 'solo-one', 'solo-three', 'solo-two', 'team-x-checker', 'team-x-lead', 'team-x-maker'],
+    'state carries the full expert table from the scan')
+  assert.equal(payload.experts.find((expert) => expert.id === 'team-x-maker').zhName, '制造工程师',
+    'card fields survive the route hop')
+  assert.ok(payload.warnings.some((warning) => warning.includes('duplicate expert id "dup-expert"')),
+    'scan warnings surface in the state payload')
 }
 
 // config: expectedRevision — fresh passes, stale conflicts transparently.
@@ -442,6 +819,7 @@ assert.equal(routeSettings.registrations.get(SETTINGS_NS).watchers.length, 0,
   'settings disposer drops the cache-invalidation watcher')
 
 rmSync(fixtureDir, { recursive: true, force: true })
+rmSync(fixtureRoot, { recursive: true, force: true })
 
 // ── 6. client bundle: loads through the stub loader, mounts nothing ─────────
 

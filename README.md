@@ -2,7 +2,7 @@
 
 DSH（DeepSeek Harness）插件：把本地 WorkBuddy 专家目录变成 DSH 里的专家市场——扫描 `~/.workbuddy/plugins/marketplaces/experts/plugins`，浏览专家卡，一键装成用户级 agent preset。**专家内容永远留在你的目录里**，插件仓库零数据、零拷贝。
 
-> 状态：T1 走路骨架（issue #2）。settings 命名空间、空扫描器与三个 HTTP 路由（`/api/state`、`/api/config`、`/api/refresh`）已就位；真实扫描、市场页与召唤工具见 [docs/design.md](docs/design.md) 的切相计划。
+> 状态：T1 + T2（issue #2/#3）。settings 命名空间、三个 HTTP 路由（`/api/state`、`/api/config`、`/api/refresh`）与**真实扫描器**（一个 agent md 一张专家卡：plugin.json 首选元数据、CRLF 容错、模板转义、团队拆卡与成员头像、`git:` 副本跳过、坏目录降级 warning）已就位；安装、市场页与召唤工具见 [docs/design.md](docs/design.md) 的切相计划。
 
 ## 安装（scratch / 自有 profile）
 

@@ -222,5 +222,6 @@ P1 结束即可用 API 驱动安装（curl 可验）；P2 才有页面；P3 召�
 | 16 | 同名 id | 跨插件同名 frontmatter name → first-wins + warning（姊妹装载同款；id 决定 preset 名不可静默覆盖） | §2 |
 | 17 | manifest 缺失/损坏 | 并入 `broken: true` + 专属 warning 文案「清单缺失，请卸载重装」；install/update 撞到时报同样错误 | §4 §5 |
 | 18 | 实现细节 | `~` 原串存储/使用时展开；丢弃字段清单补全（vibe/emoji/color、plugin.json 的 version/homepage/quickPrompts/defaultInitPrompt/categoryId/tags）；`agents/` 只扫平铺 `*.md`；`!!js` 表达式逐字照抄 shipped cordis preset；mtime touch 假报 updatable 披露 | §2 §3 §4 |
+| 19 | zhName 末端兜底（T2 实施新增） | 正文首 H1 的括号职能名作**最后一个中文来源**插在 `name` 兜底之前（仅接受含 Han 且 ≤40 字；无括号取整个标题）：实测 4 个专家（design-to-code / dockerfile-gen / product-management / remotion-video-generator）frontmatter 与 plugin.json 均无任何中文元数据，设计链必然落到英文 `name`，而工票 #3 验收要求「18 个无 frontmatter displayName 的专家全部取到中文职能名、无英文 id 兜底」——这 4 个的正文 H1 恰为「品牌（职能名）」形（`图变码（设计转代码专家）`）。**只增不改**：设计链能命中的专家 zhName 分毫不变；末端兜底仍按 §2 表落到 `name`（displayName.en ?? id），不落裸 id。另：root 不存在的 warning 由 state 层（pathExists）报出，scanner 不重复报（§2 行为口径不变，实现分工在此注明） | §2 |
 
 后续新议题在此追加，保持「议题 → 决策 → 落点」三列。

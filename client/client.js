@@ -36,8 +36,33 @@
  *     import date, broken flag) and its own confirmed uninstall — the
  *     roster, not the scan table, is the uninstall authority.
  *
- * Deliberately NOT here (later tickets): the summon entry points (#10's
- * button, #11's @ trigger).
+ * Ticket #11 (this file's current addition) ships the two summon entry
+ * points on top of the page, both mirroring the sister plugin's verified
+ * surfaces verbatim where they overlap (dsh-agency-market/client/
+ * client.js):
+ *
+ *   - one `conversation.input.left` entry: the 召唤专家 pill button. Its
+ *     popover lists INSTALLED WorkBuddy experts with a filter box (once
+ *     the roster passes eight), each card's PNG avatar (the same face the
+ *     market grid shows, emoji fallback) beside the localized name over
+ *     the mono id + description, arrow-key navigation, Escape to close,
+ *     and a footer that promises the pick only writes a DRAFT — never
+ *     auto-sends. Zero installs (healthy route) opens the market settings
+ *     section instead; a failed route still opens the popover with
+ *     empty-state copy;
+ *   - one '@' input trigger source ("workbuddy-market") feeding the SAME
+ *     installed roster into the composer's @ menu. Registered only when
+ *     the inputTriggers service is composed (package.json
+ *     dsh.client.inject lists dsh-client-ui-input-trigger — restored by
+ *     this ticket); skipped silently otherwise.
+ *
+ * Both draft the SAME instruction template (zh/en), whose tool wording
+ * follows src/summon.js: the draft asks the MODEL to call
+ * summon_workbuddy_expert — the client never calls the tool itself, it
+ * only writes the draft. The roster comes from GET /api/state's install
+ * overlay (expert.installed === true — exactly the set the host's
+ * workbuddy_experts lists: orphans from another source never flag a card
+ * installed, broken installs stay summonable).
  *
  * One intentional deviation from the sister, kept from ticket #8: the
  * scoped <style data-plugin> tag is injected inside apply() and removed by
@@ -229,9 +254,42 @@ var CSS = `
 .wbm-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
+/* ── the summon popover (#11): the input pill's roster dropdown ──────────── */
+.wbm-summon-wrap { position: relative; order: 1; }
+.wbm-summon-btn { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 4px 0 8px; border: none;
+  border-radius: 24px; background: transparent; color: var(--dsw-alias-label-secondary, inherit);
+  font-size: 13px; line-height: 20px; font-weight: 500; cursor: pointer; }
+.wbm-summon-btn:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.12)); color: var(--dsw-alias-label-primary, inherit); }
+.wbm-summon-menu { position: absolute; bottom: calc(100% + 4px); left: 0; box-sizing: border-box; padding: 4px;
+  display: flex; flex-direction: column; width: 320px; max-width: 360px; max-height: calc(100vh - 24px); overflow-y: auto;
+  border: 1px solid var(--dsw-alias-border-inverted, rgba(127,127,127,.35)); border-radius: 12px;
+  background: var(--dsw-specific-menu, var(--dsw-alias-bg-layer-2, inherit));
+  box-shadow: var(--dsw-shadow-lv3, 0 8px 24px rgba(0,0,0,.18)); z-index: 10000; }
+.wbm-summon-menu-title { padding: 8px 10px 6px; font-size: 12px; line-height: 16px; color: var(--dsw-alias-label-tertiary, inherit); }
+.wbm-summon-filter { box-sizing: border-box; width: 100%; margin: 0 0 4px; padding: 7px 10px; font-size: 13px;
+  border-radius: 8px; border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.35)); outline: none;
+  background: var(--dsw-alias-bg-layer-1, transparent); color: var(--dsw-alias-label-primary, inherit); }
+.wbm-summon-filter:focus { border-color: var(--dsw-alias-brand-primary, currentColor); }
+.wbm-summon-filter::placeholder { color: var(--dsw-alias-label-tertiary, inherit); }
+.wbm-summon-item { display: flex; align-items: flex-start; gap: 8px; width: 100%; padding: 8px 10px;
+  border: none; border-radius: 10px; background: transparent; cursor: pointer; text-align: left;
+  color: var(--dsw-alias-label-primary, inherit); box-sizing: border-box; }
+.wbm-summon-item:hover, .wbm-summon-item[data-active="true"] { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.12)); }
+.wbm-summon-emoji { flex: 0 0 auto; font-size: 16px; line-height: 20px; }
+img.wbm-summon-emoji { width: 20px; height: 20px; border-radius: 6px; object-fit: cover; }
+.wbm-summon-item-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.wbm-summon-item-name { font-size: 14px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wbm-summon-item-desc { font-family: ${MONO}; font-size: 11px; line-height: 16px; color: var(--dsw-alias-label-tertiary, inherit);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wbm-summon-empty { padding: 8px 10px; font-size: 13px; color: var(--dsw-alias-label-secondary, inherit); }
+.wbm-summon-foot { margin-top: 4px; padding: 7px 10px 5px; font-size: 11px; line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary, inherit);
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.2)); }
+
 /* ── quality floor: visible keyboard focus, calm motion ──────────────────── */
 .wbm-btn:focus-visible, .wbm-chip:focus-visible, .wbm-search:focus-visible, .wbm-path-input:focus-visible,
-.wbm-warns-toggle:focus-visible {
+.wbm-warns-toggle:focus-visible, .wbm-summon-btn:focus-visible, .wbm-summon-item:focus-visible,
+.wbm-summon-filter:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary, currentColor); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .wbm-skel-card { animation: none; }
@@ -323,7 +381,17 @@ var DICTS = {
     orphansTitle: '已安装但不在当前源',
     orphansHint: '这些 preset 装自别的源目录（或其专家已不在当前源中）——只呈列，不自动卸载；确认后可按 id 卸载。',
     orphanBroken: '清单异常',
-    orphanImported: '安装于 {when}'
+    orphanImported: '安装于 {when}',
+    // ── #11: the summon entry points (button + '@' source) ────────────────
+    summonButtonTitle: '召唤专家',
+    summonButtonLabel: '召唤专家',
+    summonMenuTitle: '已安装的 WorkBuddy 专家',
+    summonMenuEmpty: '暂无可召唤的 WorkBuddy 专家',
+    summonFilter: '过滤专家…',
+    summonFootnote: '选中后写入指令草稿，不会自动发送',
+    summonInstruction: '用 summon_workbuddy_expert 召唤专家「{name}」（{slug}）处理以下任务：',
+    summonInstructionWithTask: '用 summon_workbuddy_expert 召唤专家「{name}」（{slug}）处理以下任务：\n{task}',
+    triggerSection: 'WorkBuddy 专家'
   },
   en: {
     nav: 'WorkBuddy Experts',
@@ -382,7 +450,17 @@ var DICTS = {
     orphansTitle: 'Installed from another source',
     orphansHint: 'These presets came from another source directory (or their expert left this one) — listed, never auto-uninstalled; confirm to uninstall by id.',
     orphanBroken: 'manifest broken',
-    orphanImported: 'installed {when}'
+    orphanImported: 'installed {when}',
+    // ── #11: the summon entry points (button + '@' source) ────────────────
+    summonButtonTitle: 'Summon expert',
+    summonButtonLabel: 'Summon expert',
+    summonMenuTitle: 'Installed WorkBuddy experts',
+    summonMenuEmpty: 'No WorkBuddy experts summonable yet',
+    summonFilter: 'Filter experts…',
+    summonFootnote: 'Picking writes an instruction draft — it never auto-sends',
+    summonInstruction: 'Summon expert "{name}" ({slug}) with summon_workbuddy_expert to handle the following task:',
+    summonInstructionWithTask: 'Summon expert "{name}" ({slug}) with summon_workbuddy_expert to handle the following task:\n{task}',
+    triggerSection: 'WorkBuddy Experts'
   }
 }
 
@@ -638,6 +716,31 @@ function ActionRow (props) {
 // ── the card ────────────────────────────────────────────────────────────────
 
 /**
+ * The shared avatar face: the card's PNG through avatarUrl when the payload
+ * carries one AND it loads (onError flips to the glyph), the static 🧑‍💻
+ * emoji otherwise — a PNG-less card or a failed load makes no placeholder
+ * request. The market card and the summon popover (#11) render the same
+ * face at different sizes (imgClass/glyphClass pick the seat's classes).
+ */
+function AvatarFace (props) {
+  var expert = props.expert
+  var avatarState = React.useState(false)
+  var avatarFailed = avatarState[0]
+  var setAvatarFailed = avatarState[1]
+  if (!avatarFailed && strOf(expert.avatarUrl) !== '') {
+    return el('img', {
+      className: props.imgClass,
+      src: expert.avatarUrl,
+      alt: '',
+      loading: 'lazy',
+      decoding: 'async',
+      onError: function () { setAvatarFailed(true) }
+    })
+  }
+  return el('span', { className: props.glyphClass, 'aria-hidden': 'true' }, AVATAR_EMOJI)
+}
+
+/**
  * One expert card: avatar (PNG via avatarUrl; onError OR a PNG-less card
  * falls back to the static 🧑‍💻 emoji — no placeholder request), a
  * locale-following name over the mono id, a locale-following two-line
@@ -653,23 +756,7 @@ function ExpertCard (props) {
   var expert = props.expert
   var localeId = props.localeId
 
-  var avatarState = React.useState(false)
-  var avatarFailed = avatarState[0]
-  var setAvatarFailed = avatarState[1]
-
-  var avatar
-  if (!avatarFailed && strOf(expert.avatarUrl) !== '') {
-    avatar = el('img', {
-      className: 'wbm-avatar',
-      src: expert.avatarUrl,
-      alt: '',
-      loading: 'lazy',
-      decoding: 'async',
-      onError: function () { setAvatarFailed(true) }
-    })
-  } else {
-    avatar = el('span', { className: 'wbm-emoji', 'aria-hidden': 'true' }, AVATAR_EMOJI)
-  }
+  var avatar = el(AvatarFace, { expert: expert, imgClass: 'wbm-avatar', glyphClass: 'wbm-emoji' })
 
   var name = localeNameOf(expert, localeId)
   var badges = []
@@ -1286,6 +1373,327 @@ function MarketPage (props) {
       : null)
 }
 
+// ── the summon entry points (#11): input-box button + '@' trigger source ────
+
+/**
+ * Installed (summonable) WorkBuddy experts off GET /api/state — the same
+ * route and install overlay the market page reads, so the button, the '@'
+ * menu, and the host's summonableCards (src/summon.js) share ONE
+ * classification authority: expert.installed === true is exactly the set
+ * workbuddy_experts lists (an orphan installed from another source never
+ * flags its card installed; a broken install stays summonable, design §6).
+ * The payload is bilingual, so names/descriptions localize client-side
+ * (localeNameOf/localeDescriptionOf) and the fetch needs no locale
+ * parameter. Never rejects and never throws synchronously: failure yields
+ * { ok: false, experts: [] } so callers can tell "zero installs" apart
+ * from "state route failed".
+ */
+function fetchInstalledExperts () {
+  return Promise.resolve().then(function () {
+    return api(API_BASE + '/state')
+  }).then(function (body) {
+    var experts = body !== undefined && body !== null && Array.isArray(body.experts) ? body.experts : []
+    return {
+      ok: true,
+      experts: experts.filter(function (expert) {
+        return expert !== undefined && expert !== null && typeof expert === 'object' &&
+          expert.installed === true && typeof expert.id === 'string'
+      })
+    }
+  }, function () {
+    return { ok: false, experts: [] }
+  })
+}
+
+/**
+ * Open the settings dialog and navigate to this plugin's market section:
+ * with nothing installed yet, the button's healthy-empty path routes the
+ * user to the install surface instead of an empty popover (sister-plugin
+ * pattern — click the toolbar trigger if no dialog is open yet, then,
+ * after two animation frames, click the nav button whose text equals our
+ * section label).
+ */
+function openMarketSettings (t) {
+  if (typeof document === 'undefined' || document === null) return
+  if (document.querySelector('[role="dialog"]') === null) {
+    var trigger = document.querySelector('button[aria-haspopup="dialog"]')
+    if (trigger !== null && trigger !== undefined && typeof trigger.click === 'function') trigger.click()
+  }
+  var select = function () {
+    var buttons = document.querySelectorAll('[role="dialog"] nav button')
+    var wanted = t('nav')
+    for (var i = 0; i < buttons.length; i++) {
+      var button = buttons[i]
+      if (button.textContent !== null && button.textContent.trim() === wanted) {
+        if (typeof button.click === 'function') button.click()
+        return
+      }
+    }
+  }
+  var frame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+    ? window.requestAnimationFrame
+    : function (fn) { setTimeout(fn, 16) }
+  frame(function () { frame(select) })
+}
+
+/**
+ * The summon instruction draft for (name, slug). The tool wording follows
+ * src/summon.js's descriptions: the draft ASKS THE MODEL to call
+ * summon_workbuddy_expert (the client never calls the tool itself — it
+ * only writes the draft). The ticket's "workbuddy 两位" fixes the NAMESPACE
+ * (these names, never the sister's market_* pair): the draft names the
+ * summon tool alone because it already carries the expert's exact id and
+ * display name — workbuddy_experts (the list tool) only matters when the
+ * id is unknown, which a draft never is. A non-blank composer draft rides
+ * along as the task.
+ */
+function buildSummonInstruction (t, name, slug, draft) {
+  var task = typeof draft === 'string' ? draft : ''
+  return t(task.trim().length > 0 ? 'summonInstructionWithTask' : 'summonInstruction', {
+    name: name,
+    slug: slug,
+    task: task
+  })
+}
+
+/**
+ * The summon-side search haystack of one card under one UI language: the
+ * id and BOTH names always match (cross-language, like the page search),
+ * plus the currently shown name/description — one matcher shared by the
+ * popover filter and the '@' candidates.
+ */
+function summonHaystackOf (expert, localeId) {
+  return [strOf(expert.id), strOf(expert.name), strOf(expert.zhName),
+    localeNameOf(expert, localeId), localeDescriptionOf(expert, localeId)].join(' ').toLowerCase()
+}
+
+/** The sparkle glyph beside the button label (inline SVG, no request). */
+function summonIcon () {
+  return el('svg', {
+    viewBox: '0 0 16 16',
+    width: 14,
+    height: 14,
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.5,
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    'aria-hidden': true
+  },
+    el('path', { d: 'M8 2.5l1.15 2.35 2.35 1.15-2.35 1.15L8 9.5l-1.15-2.35L4.5 6l2.35-1.15z' }),
+    el('path', { d: 'M12.75 10.25l.55 1.2 1.2.55-1.2.55-.55 1.2-.55-1.2-1.2-.55 1.2-.55z' }))
+}
+
+/** Pointer target inside the button container or the popover: keep the menu. */
+function pointerInsideSummonUi (target) {
+  if (target === null || target === undefined || typeof target.closest !== 'function') return false
+  return target.closest('.wbm-summon-menu') !== null || target.closest('.wbm-summon-wrap') !== null
+}
+
+/**
+ * Pill button in the input row (sister shape). Click fetches the installed
+ * roster first: a healthy empty roster opens the market settings section
+ * (nothing to summon — go install one); a failed fetch still toggles the
+ * menu, which shows its empty-state copy. The popover carries a filter box
+ * once the roster passes eight, the localized name over the mono id (the
+ * description line, falling back to the bare id when the card has none),
+ * arrow-key navigation from the filter field, Escape to close, and a
+ * footer that promises the pick only writes a DRAFT through
+ * inputActions.setDraft — it never sends.
+ */
+function SummonButton (props) {
+  var t = props.t
+  // The UI language read LIVE per render: names re-derive from the same
+  // bilingual snapshot, so a locale switch re-renders through the slot's
+  // locale seat with no refetch.
+  var localeId = props.getLocale()
+  var openState = React.useState(false)
+  var open = openState[0]
+  var setOpen = openState[1]
+  var listState = React.useState([])
+  var installed = listState[0]
+  var setInstalled = listState[1]
+  var filterState = React.useState('')
+  var filter = filterState[0]
+  var setFilter = filterState[1]
+  var activeState = React.useState(-1)
+  var active = activeState[0]
+  var setActive = activeState[1]
+
+  React.useEffect(function () {
+    if (!open || typeof document === 'undefined' || document === null) return undefined
+    var onPointerDown = function (event) {
+      if (pointerInsideSummonUi(event && event.target)) return
+      setOpen(false)
+    }
+    var onKeyDown = function (event) {
+      if (event !== null && event !== undefined && event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return function () {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [open])
+
+  var onClick = function () {
+    fetchInstalledExperts().then(function (result) {
+      setInstalled(result.experts)
+      setFilter('')
+      setActive(-1)
+      if (result.ok === true && result.experts.length === 0) {
+        openMarketSettings(t)
+        return
+      }
+      setOpen(function (prev) { return !prev })
+    })
+  }
+
+  var pick = function (expert) {
+    var draft = props.input !== undefined && props.input !== null && typeof props.input.draft === 'string'
+      ? props.input.draft
+      : ''
+    if (props.inputActions !== undefined && typeof props.inputActions.setDraft === 'function') {
+      props.inputActions.setDraft(buildSummonInstruction(t, localeNameOf(expert, localeId), strOf(expert.id), draft))
+    }
+    setOpen(false)
+  }
+
+  var visible = open
+    ? installed.filter(function (expert) {
+        var q = filter.trim().toLowerCase()
+        if (q === '') return true
+        return summonHaystackOf(expert, localeId).indexOf(q) !== -1
+      })
+    : []
+
+  var onFilterKeyDown = function (event) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      var count = visible.length
+      if (count === 0) return
+      setActive(function (prev) {
+        return event.key === 'ArrowDown' ? (prev + 1) % count : (prev - 1 + count) % count
+      })
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      if (active >= 0 && visible[active] !== undefined) pick(visible[active])
+    }
+  }
+
+  var menu = null
+  if (open) {
+    var items = visible.map(function (expert, index) {
+      var name = localeNameOf(expert, localeId)
+      var description = localeDescriptionOf(expert, localeId)
+      return el('button', {
+        key: strOf(expert.id),
+        type: 'button',
+        className: 'wbm-summon-item',
+        'data-active': index === active ? 'true' : undefined,
+        title: description !== '' ? description : strOf(expert.id),
+        onMouseDown: function (event) {
+          event.preventDefault()
+          pick(expert)
+        },
+        // Keyboard activation arrives as a click with detail 0.
+        onClick: function (event) {
+          if (event !== null && event !== undefined && event.detail === 0) pick(expert)
+        },
+        ref: index === active
+          ? function (node) {
+              if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'nearest' })
+            }
+          : undefined
+      },
+        el(AvatarFace, { expert: expert, imgClass: 'wbm-summon-emoji', glyphClass: 'wbm-summon-emoji' }),
+        el('span', { className: 'wbm-summon-item-body' },
+          el('span', { className: 'wbm-summon-item-name' }, name),
+          description !== ''
+            ? el('span', { className: 'wbm-summon-item-desc' }, strOf(expert.id) + ' — ' + description)
+            : el('span', { className: 'wbm-summon-item-desc' }, strOf(expert.id))))
+    })
+    menu = el('div', { className: 'wbm-summon-menu' },
+      el('div', { className: 'wbm-summon-menu-title' }, t('summonMenuTitle')),
+      installed.length > 8
+        ? el('input', {
+            className: 'wbm-summon-filter',
+            type: 'search',
+            value: filter,
+            placeholder: t('summonFilter'),
+            'aria-label': t('summonFilter'),
+            onChange: function (event) { setFilter(event.target.value); setActive(-1) },
+            onKeyDown: onFilterKeyDown
+          })
+        : null,
+      items.length === 0
+        ? el('div', { className: 'wbm-summon-empty' }, t('summonMenuEmpty'))
+        : items,
+      el('div', { className: 'wbm-summon-foot' }, t('summonFootnote')))
+  }
+
+  return el('div', { className: 'wbm-summon-wrap' },
+    el('button', {
+      type: 'button',
+      className: 'wbm-summon-btn',
+      title: t('summonButtonTitle'),
+      onClick: onClick
+    },
+      summonIcon(),
+      el('span', null, t('summonButtonLabel'))),
+    menu)
+}
+
+/**
+ * The '@' trigger source: one group of INSTALLED WorkBuddy experts fed by
+ * the same /api/state overlay as the button. Candidates show the
+ * locale-following name with the mono id riding the description line
+ * (id + zhName/enName), carry a localized `section` heading (rendered
+ * verbatim in place of the raw source name, which the slash.menu namespace
+ * cannot translate for third-party sources), and stash the expert id in
+ * `hint`; onPick splices the summon instruction over the trigger token —
+ * a draft, never a send. The icon seat renders a plain STRING glyph, so
+ * the candidate carries the static 🧑‍💻 emoji, not the card's PNG (the
+ * menu's icon seat cannot take a URL; the popover, which owns its own
+ * markup, shows the real avatar).
+ */
+function buildTriggerSource (t, getLocale) {
+  return {
+    trigger: '@',
+    name: 'workbuddy-market',
+    order: 150,
+    candidates: function (_session, req) {
+      var query = req !== undefined && req !== null && typeof req.query === 'string' ? req.query : ''
+      var q = query.trim().toLowerCase()
+      var localeId = getLocale()
+      return fetchInstalledExperts().then(function (result) {
+        return result.experts.filter(function (expert) {
+          if (q === '') return true
+          return summonHaystackOf(expert, localeId).indexOf(q) !== -1
+        }).map(function (expert) {
+          var description = localeDescriptionOf(expert, localeId)
+          return {
+            name: localeNameOf(expert, localeId),
+            icon: AVATAR_EMOJI,
+            hint: strOf(expert.id),
+            section: t('triggerSection'),
+            description: description !== '' ? strOf(expert.id) + ' · ' + description : strOf(expert.id)
+          }
+        })
+      })
+    },
+    onPick: function (pick) {
+      var candidate = pick !== undefined && pick !== null && pick.candidate !== undefined && pick.candidate !== null
+        ? pick.candidate
+        : {}
+      var name = typeof candidate.name === 'string' ? candidate.name : ''
+      var slug = typeof candidate.hint === 'string' ? candidate.hint : ''
+      return { text: buildSummonInstruction(t, name, slug, '') }
+    }
+  }
+}
+
 function apply (ctx) {
   var t = fallbackT
   var locale = ctx.locale
@@ -1347,6 +1755,46 @@ function apply (ctx) {
     })
   }))
 
+  // The input-box summon button (#11): conversation.input.left, the seat
+  // the sister plugin's verified button rides. Order 1 keeps this plugin's
+  // pill beside — and after — the sister's order-0 pill when both markets
+  // compose in one profile.
+  collect(slots.inject('conversation.input.left', function () {
+    return slots.register({
+      name: 'conversation.input.left',
+      id: 'workbuddy-market',
+      order: 1,
+      locale: NS
+    }, function (props) {
+      props = props || {}
+      // The session-scoped standard-kit provider supplies inputActions
+      // (setDraft) and the input state (draft). Without a setDraft seam the
+      // button has no way to write the draft, so it degrades to hidden.
+      if (props.inputActions === undefined || props.inputActions === null ||
+          typeof props.inputActions.setDraft !== 'function') return null
+      return el(SummonButton, { t: t, getLocale: getLocale, input: props.input, inputActions: props.inputActions })
+    })
+  }))
+
+  // The '@' trigger source (#11) needs the inputTriggers service, composed
+  // via package.json dsh.client.inject (dsh-client-ui-input-trigger —
+  // restored by this ticket). A missing service (or a duplicate-name
+  // registration) only skips the @ entry; the settings page and the input
+  // button are unaffected.
+  var inputTriggers = typeof ctx.get === 'function' ? ctx.get('inputTriggers') : undefined
+  if (inputTriggers !== undefined && inputTriggers !== null && typeof inputTriggers.registerSource === 'function') {
+    try {
+      collect(inputTriggers.registerSource(buildTriggerSource(t, getLocale)))
+    } catch (error) {
+      if (ctx.logger && typeof ctx.logger.warn === 'function') {
+        ctx.logger.warn('dsh-workbuddy-market: input trigger source registration failed: ' +
+          (error && error.message ? error.message : String(error)))
+      }
+    }
+  } else if (ctx.logger && typeof ctx.logger.warn === 'function') {
+    ctx.logger.warn('dsh-workbuddy-market: inputTriggers service unavailable; @ trigger source not registered')
+  }
+
   // The scoped style tag is injected only after every registration succeeded
   // (a failed apply must not leak it), and its removal joins the disposers —
   // this fiber owns the cleanup (see the header note for the why).
@@ -1362,6 +1810,10 @@ function apply (ctx) {
 // 'slots' comes with the client runtime core; 'locale' is provided by
 // dsh-client-locale, which package.json dsh.client.inject composes alongside
 // dsh-client-ui-settings (the settings.section slot's declaring owner).
+// 'inputTriggers' (dsh-client-ui-input-trigger, likewise composed there) is
+// deliberately NOT declared here: a hard inject would stall the whole plugin
+// in compositions without the service, so apply() reads it via ctx.get and
+// degrades to skipping only the @ source.
 module.exports = { name: NS, inject: ['slots', 'locale'], apply: apply }
 // Extra exports for offline smoke checks (scripts/smoke.mjs); the module
 // loader treats unknown plugin keys as inert.
@@ -1375,5 +1827,9 @@ module.exports.formatWhen = formatWhen
 module.exports.ExpertCard = ExpertCard
 module.exports.OrphanRow = OrphanRow
 module.exports.MarketPage = MarketPage
+module.exports.fetchInstalledExperts = fetchInstalledExperts
+module.exports.buildSummonInstruction = buildSummonInstruction
+module.exports.SummonButton = SummonButton
+module.exports.buildTriggerSource = buildTriggerSource
 return module.exports;
 } });

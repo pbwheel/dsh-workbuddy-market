@@ -96,6 +96,20 @@
  *      collapsed-by-default warnings fold, locale-following cards), and
  *      the apply disposer releases the slot entry AND the scoped style
  *      tag (a re-apply after dispose re-injects idempotently);
+ *   6c. the summon entry points (ticket #11) over the same storing React
+ *      stub and scripted fetch: the zh/en instruction drafts (tool
+ *      wording per src/summon.js — the draft asks the model to call
+ *      summon_workbuddy_expert; a non-blank composer draft rides along as
+ *      the task), one apply() registering BOTH seats (settings.section +
+ *      conversation.input.left) plus the '@' source with the inputTriggers
+ *      service, the trigger's installed-only candidates (broken installs
+ *      stay, id + localized name on every row), zh/en/id query filtering,
+ *      the { text } pick arm, the never-rejecting fetch-failure path, the
+ *      REAL button machine (click → fetch → popover → pick → setDraft
+ *      with the draft and nothing else — no send seam exists; healthy
+ *      zero-installs opens the settings section instead of the popover;
+ *      a failed route still opens the popover with empty-state copy), and
+ *      one disposer releasing both registrations with the style tag;
  *   8. summon tools (ticket #10) against a mocked tools/subagents/prompt
  *      seam over a dedicated scan fixture (the sister plugin's mock
  *      approach, this ticket's new build): the four-name deny list and its
@@ -143,6 +157,8 @@ assert.ok(Array.isArray(pkg.dsh.client.inject) && pkg.dsh.client.inject.length >
 assert.ok(pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-locale') &&
   pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'),
   'client inject composes the locale service and the settings.section declaring owner (ticket #8)')
+assert.ok(pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-input-trigger'),
+  'client inject composes the inputTriggers service owner for the @ source (ticket #11, restored)')
 for (const [specifier, target] of Object.entries(pkg.exports)) {
   const path = join(root, target)
   assert.ok(readFileSync(path, 'utf8') !== undefined, `exports target exists: ${specifier} -> ${target}`)
@@ -2182,6 +2198,9 @@ globalThis.document = {
     if (match === null) return null
     return styleTags.find((tag) => tag.dataset.pluginCss === match[1]) ?? null
   },
+  // The summon button's healthy-empty path walks the settings dialog's nav
+  // (openMarketSettings); under this stub it finds nothing and stays inert.
+  querySelectorAll: () => [],
   createElement: () => ({
     dataset: {},
     textContent: '',
@@ -2265,7 +2284,11 @@ for (const key of ['nav', 'title', 'subtitle', 'censusExperts', 'censusPlugins',
   'confirmInstall', 'confirmUpdate', 'confirmUninstall', 'cancel', 'actionBusy',
   'installDone', 'updateDone', 'uninstallDone',
   'installFailed', 'updateFailed', 'uninstallFailed',
-  'orphansTitle', 'orphansHint', 'orphanBroken', 'orphanImported']) {
+  'orphansTitle', 'orphansHint', 'orphanBroken', 'orphanImported',
+  // #11: the summon entry points
+  'summonButtonTitle', 'summonButtonLabel', 'summonMenuTitle', 'summonMenuEmpty',
+  'summonFilter', 'summonFootnote', 'summonInstruction', 'summonInstructionWithTask',
+  'triggerSection']) {
   assert.ok(clientModule.DICTS.zh[key] !== undefined, `zh dict has ${key}`)
   assert.ok(clientModule.DICTS.en[key] !== undefined, `en dict has ${key}`)
 }
@@ -2369,7 +2392,7 @@ assert.equal(clientModule.localeDescriptionOf(cardAvatar, 'en'), 'Use when desig
 // onError hook; zh locale names/descriptions; badges; NO status marks for a
 // card that carries no install state (the tolerant #8 contract).
 resetMount()
-let cardTree = render(clientModule.ExpertCard, { t: tZh, expert: cardAvatar, localeId: 'zh' })
+let cardTree = expandTree(render(clientModule.ExpertCard, { t: tZh, expert: cardAvatar, localeId: 'zh' }))
 let imgNode = treeNodes(cardTree).find((node) => node.type === 'img')
 assert.ok(imgNode !== undefined, 'an avatared card renders an img')
 assert.equal(imgNode.props.src, cardAvatar.avatarUrl, 'the img src is the avatar route URL')
@@ -2388,7 +2411,7 @@ assert.equal(treeNodes(cardTree).find((node) => node.props && node.props.classNa
 // onError → the static emoji, and the img (its request) is gone entirely —
 // the fallback never issues a second network request.
 imgNode.props.onError()
-cardTree = render(clientModule.ExpertCard, { t: tZh, expert: cardAvatar, localeId: 'zh' })
+cardTree = expandTree(render(clientModule.ExpertCard, { t: tZh, expert: cardAvatar, localeId: 'zh' }))
 assert.equal(treeNodes(cardTree).find((node) => node.type === 'img'), undefined,
   'after onError the img is unmounted (no placeholder request can follow)')
 assert.ok(treeText(cardTree).includes(clientModule.AVATAR_EMOJI), 'the static emoji takes over')
@@ -2396,7 +2419,7 @@ assert.equal(clientModule.AVATAR_EMOJI, '🧑‍💻', 'the fallback is the desi
 
 // A PNG-less card (scan found no avatar) starts at the emoji.
 resetMount()
-cardTree = render(clientModule.ExpertCard, { t: tZh, expert: { ...cardBroken, avatarUrl: undefined }, localeId: 'zh' })
+cardTree = expandTree(render(clientModule.ExpertCard, { t: tZh, expert: { ...cardBroken, avatarUrl: undefined }, localeId: 'zh' }))
 assert.equal(treeNodes(cardTree).find((node) => node.type === 'img'), undefined)
 assert.ok(treeText(cardTree).includes(clientModule.AVATAR_EMOJI))
 
@@ -2483,7 +2506,10 @@ pageTree = expandTree(render(clientModule.MarketPage, {
   assert.ok(text.includes('清除筛选'), 'empty state offers the clear-filters action')
 }
 
-// apply(): one settings.section entry, style owned by the disposer.
+// apply(): the settings-section entry plus the input button's seat, style
+// owned by the disposer. (The @ source needs the inputTriggers service —
+// §6c drives apply() with one; this call has no ctx.get, so only the two
+// slot entries register, proving the degradation.)
 const injectedSlots = []
 const slotEntries = []
 const slotsStub = {
@@ -2502,7 +2528,8 @@ const slotsStub = {
 }
 const offApply = clientModule.apply({ slots: slotsStub })
 assert.equal(typeof offApply, 'function', 'apply returns a disposer')
-assert.deepEqual(injectedSlots, ['settings.section'], 'the settings-section slot entry injected')
+assert.deepEqual(injectedSlots, ['settings.section', 'conversation.input.left'],
+  'both slot entries injected: the market page and the input button (#11)')
 assert.equal(styleTags.length, 1, 'the scoped style tag is injected alongside the registration')
 assert.equal(styleTags[0].dataset.plugin, 'dsh-workbuddy-market', 'the tag is plugin-owned')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-card'), 'CSS actually attached')
@@ -2511,6 +2538,8 @@ assert.ok(String(styleTags[0].textContent).includes('.wbm-pathbar'), 'path topba
 assert.ok(String(styleTags[0].textContent).includes('.wbm-spin'), 'refresh spinner CSS attached')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-conflict'), 'revision conflict CSS attached')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-orphans'), 'orphans CSS attached')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-summon-menu'), 'summon popover CSS attached (#11)')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-summon-btn'), 'summon button CSS attached (#11)')
 assert.ok(String(styleTags[0].textContent).includes('@keyframes wbm-spin'), 'the spin keyframes exist')
 
 const settingsEntry = slotEntries.find((entry) => entry.meta.name === 'settings.section')
@@ -2528,7 +2557,7 @@ assert.equal(slotEntries.length, 0, 'slot entries released by the apply disposer
 assert.equal(styleTags.length, 0, 'scoped style tag removed by the apply disposer')
 const offAgain = clientModule.apply({ slots: slotsStub })
 assert.equal(styleTags.length, 1, 're-apply re-injects the style tag (single, not duplicated)')
-assert.equal(slotEntries.length, 1, 're-apply registers the slot entry again')
+assert.equal(slotEntries.length, 2, 're-apply registers both slot entries again')
 offAgain()
 assert.equal(slotEntries.length, 0)
 assert.equal(styleTags.length, 0)
@@ -2937,6 +2966,255 @@ assert.equal(clientModule.formatWhen(undefined, 'zh'), '')
 }
 
 globalThis.fetch = realFetch
+
+// ── 6c. the summon entry points (ticket #11): input button + '@' source ────
+//
+// The storing React stub and scripted fetch drive the REAL machines: the
+// SummonButton click → /api/state → popover → pick → setDraft flow (and
+// nothing else — no send seam is ever touched), and the '@' source's
+// candidates/onPick against installed-only rosters. Both seats ride ONE
+// apply(); the disposer releases them together with the style tag.
+
+// Instruction drafts: zh/en × with/without (blank) draft — the tool wording
+// follows src/summon.js (the draft asks the MODEL to call
+// summon_workbuddy_expert; the client never calls the tool itself).
+assert.equal(clientModule.buildSummonInstruction(tZh, '后端架构师', 'backend-architect', ''),
+  '用 summon_workbuddy_expert 召唤专家「后端架构师」（backend-architect）处理以下任务：')
+assert.equal(clientModule.buildSummonInstruction(tZh, '后端架构师', 'backend-architect', '   '),
+  '用 summon_workbuddy_expert 召唤专家「后端架构师」（backend-architect）处理以下任务：',
+  'blank draft behaves like empty')
+assert.equal(clientModule.buildSummonInstruction(tZh, '后端架构师', 'backend-architect', '评审 src/foo.js'),
+  '用 summon_workbuddy_expert 召唤专家「后端架构师」（backend-architect）处理以下任务：\n评审 src/foo.js',
+  'a non-blank composer draft rides along as the task')
+assert.equal(clientModule.buildSummonInstruction(tEn, 'Backend Architect', 'backend-architect', ''),
+  'Summon expert "Backend Architect" (backend-architect) with summon_workbuddy_expert to handle the following task:')
+assert.ok(clientModule.buildSummonInstruction(tEn, 'Backend Architect', 'backend-architect', 'review src/foo.js')
+  .endsWith('\nreview src/foo.js'), 'english draft rides along as the task')
+
+// One apply() with the inputTriggers service: BOTH slot entries plus the
+// '@' source register, and the style tag rides the same disposers.
+const triggerSources = []
+injectedSlots.length = 0 // the earlier §6 applies already pushed theirs
+const offSummonApply = clientModule.apply({
+  slots: slotsStub,
+  get: (name) => (name === 'inputTriggers'
+    ? {
+        registerSource(source) {
+          triggerSources.push(source)
+          return () => {
+            const at = triggerSources.indexOf(source)
+            if (at >= 0) triggerSources.splice(at, 1)
+          }
+        },
+      }
+    : undefined),
+})
+assert.equal(typeof offSummonApply, 'function', 'apply returns a disposer')
+assert.deepEqual(injectedSlots, ['settings.section', 'conversation.input.left'],
+  'both slot entries injected under one apply')
+assert.equal(triggerSources.length, 1, 'one @ trigger source registered')
+assert.equal(styleTags.length, 1, 'the scoped style tag rides the same apply')
+
+const inputEntry = slotEntries.find((entry) => entry.meta.name === 'conversation.input.left')
+assert.ok(inputEntry !== undefined, 'the input.left seat registered')
+assert.equal(inputEntry.meta.id, 'workbuddy-market')
+assert.equal(inputEntry.meta.order, 1)
+assert.equal(inputEntry.meta.locale, 'dsh-workbuddy-market')
+assert.equal(inputEntry.renderer({}), null, 'button degrades to hidden without inputActions')
+assert.equal(inputEntry.renderer({ inputActions: {} }), null, 'button hides when setDraft is missing')
+const summonDraftCalls = []
+const summonButtonEl = inputEntry.renderer({
+  input: { draft: '评审一下' },
+  inputActions: { setDraft: (text) => summonDraftCalls.push(text) },
+})
+assert.equal(typeof summonButtonEl.type, 'function', 'render produces a SummonButton element')
+assert.equal(summonButtonEl.props.input.draft, '评审一下')
+assert.equal(typeof summonButtonEl.props.inputActions.setDraft, 'function')
+assert.equal(summonButtonEl.props.t('summonButtonTitle'), '召唤专家', 'bound zh translator threaded through')
+assert.equal(summonButtonEl.props.getLocale(), 'zh', 'locale id threaded into the summon button')
+
+const triggerSource = triggerSources[0]
+assert.equal(triggerSource.trigger, '@', 'the source binds the @ trigger')
+assert.equal(triggerSource.name, 'workbuddy-market')
+assert.equal(typeof triggerSource.order, 'number')
+
+// candidates: the SAME state overlay the page reads — installed-only
+// (broken installs stay summonable per design §6), id + localized name on
+// every row, zh/en/id cross-language query filtering.
+const summonStateBody = {
+  experts: [
+    { id: 'backend-architect', name: 'Backend Architect', zhName: '后端架构师',
+      description: 'Use when designing APIs.', zhDescription: '设计后端接口时使用。',
+      avatarUrl: '/dsh-workbuddy-market/api/avatar?id=backend-architect', installed: true },
+    { id: 'api-dev', name: 'API Dev', zhName: '接口开发', installed: true, broken: true },
+    { id: 'dockerfile-gen', name: 'Dockerfile Gen', zhName: 'Dockerfile 生成',
+      description: 'Containerize workloads.', installed: false },
+  ],
+}
+{
+  fetchLog.length = 0
+  globalThis.fetch = (path) => {
+    fetchLog.push({ path: String(path), method: 'GET', body: undefined })
+    return Promise.resolve({ ok: true, status: 200, json: async () => summonStateBody })
+  }
+  try {
+    const all = await triggerSource.candidates({}, { query: '' })
+    assert.deepEqual(all.map((candidate) => candidate.hint), ['backend-architect', 'api-dev'],
+      'only installed experts offered (broken installs stay; uninstalled cards never appear)')
+    assert.equal(all[0].name, '后端架构师', 'zh UI shows the zhName')
+    assert.equal(all[0].description, 'backend-architect · 设计后端接口时使用。',
+      'the description line leads with the mono id (id + zhName 展示)')
+    assert.equal(all[0].icon, clientModule.AVATAR_EMOJI, 'the static glyph rides the icon seat')
+    assert.equal(all[0].section, 'WorkBuddy 专家', 'localized section heading for the @ menu')
+    assert.equal(all[1].description, 'api-dev', 'a description-less card still shows its id')
+    assert.deepEqual((await triggerSource.candidates({}, { query: '后端' })).map((c) => c.hint),
+      ['backend-architect'], 'zhName query filters')
+    assert.deepEqual((await triggerSource.candidates({}, { query: 'architect' })).map((c) => c.hint),
+      ['backend-architect'], 'base-name query filters too (cross-language haystack)')
+    assert.deepEqual((await triggerSource.candidates({}, { query: 'api-' })).map((c) => c.hint),
+      ['api-dev'], 'id query filters')
+    assert.deepEqual(await triggerSource.candidates({}, { query: '不存在' }), [],
+      'non-matching query yields nothing')
+    assert.ok(fetchLog.length > 0 && fetchLog.every((entry) => entry.path === '/dsh-workbuddy-market/api/state'),
+      'candidates hit the state route (bilingual payload — no locale parameter needed)')
+
+    const outcome = triggerSource.onPick({ candidate: all[0] })
+    assert.deepEqual(Object.keys(outcome), ['text'], 'onPick returns the plain-text arm')
+    assert.equal(outcome.text,
+      '用 summon_workbuddy_expert 召唤专家「后端架构师」（backend-architect）处理以下任务：')
+
+    // A failing state route yields no candidates without ever rejecting.
+    globalThis.fetch = () => Promise.reject(new Error('state route down'))
+    assert.deepEqual(await triggerSource.candidates({}, { query: '' }), [],
+      'fetch failure yields empty candidates without rejecting')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+// The REAL button machine over the storing stub: click → fetch → popover →
+// pick → setDraft(instruction) and NOTHING else (there is no send seam to
+// call — drafting is the entire surface).
+const pillOf = (props) => {
+  const tree = expandTree(render(clientModule.SummonButton, props))
+  const button = treeNodes(tree).find((node) =>
+    node.type === 'button' && node.props.className === 'wbm-summon-btn')
+  assert.ok(button !== undefined, 'the pill button renders')
+  return { tree, button }
+}
+{
+  fetchLog.length = 0
+  resetMount()
+  const calls = []
+  const props = {
+    t: tZh, getLocale: () => 'zh',
+    input: { draft: '评审一下' },
+    inputActions: { setDraft: (text) => calls.push(text) },
+  }
+  globalThis.fetch = (path) => {
+    fetchLog.push({ path: String(path), method: 'GET', body: undefined })
+    return Promise.resolve({ ok: true, status: 200, json: async () => summonStateBody })
+  }
+  try {
+    const first = pillOf(props)
+    assert.equal(treeText(first.button), '召唤专家', 'button label from the dictionary')
+    assert.equal(treeNodes(first.tree).find((node) =>
+      node.props && node.props.className === 'wbm-summon-menu'), undefined,
+      'menu closed before the first click')
+    assert.equal(fetchLog.length, 0, 'no fetch before the click')
+
+    first.button.props.onClick()
+    await flush()
+    let tree = expandTree(render(clientModule.SummonButton, props))
+    const menu = treeNodes(tree).find((node) =>
+      node.props && node.props.className === 'wbm-summon-menu')
+    assert.ok(menu !== undefined, 'the popover opens after the fetch lands')
+    const menuText = treeText(menu)
+    assert.ok(menuText.includes('已安装的 WorkBuddy 专家'), 'menu title')
+    assert.ok(menuText.includes('后端架构师') && menuText.includes('接口开发'),
+      'installed cards listed with their zhNames')
+    assert.ok(menuText.includes('backend-architect'), 'the mono id rides every row')
+    assert.ok(menuText.includes('选中后写入指令草稿，不会自动发送'), 'the footnote promises no auto-send')
+    assert.ok(!menuText.includes('Dockerfile'), 'uninstalled cards never appear')
+    const popoverImg = treeNodes(menu).find((node) =>
+      node.type === 'img' && node.props.className === 'wbm-summon-emoji')
+    assert.ok(popoverImg !== undefined && popoverImg.props.src === '/dsh-workbuddy-market/api/avatar?id=backend-architect',
+      'an avatared card shows its PNG face in the popover (the market grid\'s face, not the static glyph)')
+    assert.ok(treeNodes(menu).some((node) =>
+      node.type === 'span' && node.props.className === 'wbm-summon-emoji'),
+      'a PNG-less card falls back to the static glyph')
+    assert.equal(fetchLog.length, 1, 'exactly one state fetch per click')
+
+    // Pick the first item: the instruction lands through setDraft (the
+    // existing draft rides along as the task), the menu closes, and no
+    // further fetch happens.
+    const item = treeNodes(menu).find((node) =>
+      node.props && node.props.className === 'wbm-summon-item')
+    assert.ok(item !== undefined, 'menu items render')
+    item.props.onMouseDown({ preventDefault () {} })
+    assert.deepEqual(calls,
+      ['用 summon_workbuddy_expert 召唤专家「后端架构师」（backend-architect）处理以下任务：\n评审一下'],
+      'picking writes the instruction draft — and only that (never a send)')
+    tree = expandTree(render(clientModule.SummonButton, props))
+    assert.equal(treeNodes(tree).find((node) =>
+      node.props && node.props.className === 'wbm-summon-menu'), undefined,
+      'the popover closes after the pick')
+    assert.equal(fetchLog.length, 1, 'picking triggers no further fetch')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+// Healthy zero-installs → the settings section opens instead of the popover
+// (openMarketSettings degrades silently under the stub document — no dialog
+// and no nav buttons to click).
+{
+  fetchLog.length = 0
+  resetMount()
+  const calls = []
+  const props = {
+    t: tZh, getLocale: () => 'zh', input: { draft: '' },
+    inputActions: { setDraft: (text) => calls.push(text) },
+  }
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: async () => ({ experts: [] }) })
+  try {
+    pillOf(props).button.props.onClick()
+    await flush()
+    await new Promise((resolve) => setTimeout(resolve, 60)) // the helper's rAF fallback timers
+    const tree = expandTree(render(clientModule.SummonButton, props))
+    assert.equal(treeNodes(tree).find((node) =>
+      node.props && node.props.className === 'wbm-summon-menu'), undefined,
+      'a healthy empty roster opens the settings section, not the popover')
+    assert.deepEqual(calls, [], 'no draft is written on the empty path')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+// Failed route → the popover still opens, carrying the empty-state copy
+// (fetch failure stays distinguishable from zero installs).
+{
+  resetMount()
+  const props = { t: tZh, getLocale: () => 'zh', input: { draft: '' }, inputActions: { setDraft () {} } }
+  globalThis.fetch = () => Promise.reject(new Error('state route down'))
+  try {
+    pillOf(props).button.props.onClick()
+    await flush()
+    const tree = expandTree(render(clientModule.SummonButton, props))
+    const menu = treeNodes(tree).find((node) =>
+      node.props && node.props.className === 'wbm-summon-menu')
+    assert.ok(menu !== undefined, 'the popover opens even on a failed fetch')
+    assert.ok(treeText(menu).includes('暂无可召唤的 WorkBuddy 专家'), 'empty-state copy shows')
+  } finally {
+    globalThis.fetch = realFetch
+  }
+}
+
+// One disposer releases BOTH registrations together with the style tag.
+offSummonApply()
+assert.equal(triggerSources.length, 0, '@ source released by the apply disposer')
+assert.equal(slotEntries.length, 0, 'slot entries released by the apply disposer')
+assert.equal(styleTags.length, 0, 'scoped style tag removed by the same disposer')
 
 
 // ── 8. summon tools (ticket #10) against mocked tools/subagents seams ───────

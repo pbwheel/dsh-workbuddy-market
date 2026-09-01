@@ -1,6 +1,6 @@
 /**
  * HTTP routes bridging the (future) browser market page to the host. T1
- * ships the three skeleton routes from the design doc's API table:
+ * shipped the three skeleton routes; T4 (ticket #5) adds the install route:
  *
  *   GET  /dsh-workbuddy-market/api/state  → { sourcePath, pathExists,
  *                                             revision, experts, orphans,
@@ -13,18 +13,26 @@
  *                                       saveable and surface as
  *                                       pathExists=false + warning;
  *   POST /dsh-workbuddy-market/api/refresh → drop the scan cache, answer
- *                                       with a freshly scanned state.
+ *                                       with a freshly scanned state;
+ *   POST /dsh-workbuddy-market/api/install { id }
+ *                                     → install the scanned expert as the
+ *                                       user preset wb-<id> through the
+ *                                       roster (src/presets.js, the design
+ *                                       §4 seven steps).
  *
  * Security baseline (ported from the sister plugin's verified routes):
  * mutating routes accept same-origin POSTs only (405/403 otherwise), JSON
  * bodies are capped at 4 KiB, every JSON response carries no-store, and one
  * mutating operation runs at a time — a concurrent second change gets 409.
- * The single-flight lane is shared by every mutating route of this plugin;
- * the install/update/uninstall routes of later tickets join the same lane.
+ * The single-flight lane is shared by every mutating route of this plugin
+ * (roster copies are not concurrency-safe); the update/uninstall routes of
+ * later tickets join the same lane. Installs are file copies plus text
+ * edits — no script ever runs.
  */
 
 import { stat } from 'node:fs/promises'
 
+import { installWorkbuddyExpert } from './presets.js'
 import { expandTildePath } from './scanner.js'
 import { SETTINGS_NS, namespaceDescriptor } from './settings.js'
 import { errorMessage } from './util.js'
@@ -102,6 +110,11 @@ async function buildState({ settingsService, catalog }) {
   }
 }
 
+/** The RAW stored source path every scan-facing caller reads (tilde intact, #18). */
+function currentSourcePath(settingsService) {
+  return namespaceDescriptor(settingsService).value.sourcePath
+}
+
 /** Validate the `sourcePath` field of a config body; returns it verbatim. */
 function requireSourcePath(body) {
   if (body === null || typeof body !== 'object') throw new Error('body must be a JSON object')
@@ -110,6 +123,14 @@ function requireSourcePath(body) {
     throw new Error('missing sourcePath')
   }
   return sourcePath
+}
+
+/** Validate the `id` field of an install body; ids match scan cards exactly. */
+function requireExpertId(body) {
+  if (body === null || typeof body !== 'object') throw new Error('body must be a JSON object')
+  const id = body.id
+  if (typeof id !== 'string' || id.length === 0) throw new Error('missing expert id')
+  return id
 }
 
 /**
@@ -211,6 +232,30 @@ export function mountWorkbuddyMarketRoutes(hostCtx, { catalog }) {
         sendJson(response, 200, await buildState(deps))
       } catch (error) {
         sendJson(response, 500, { error: errorMessage(error) })
+      } finally {
+        mutating = false
+      }
+    },
+  })
+
+  register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/api/install`,
+    handler: async (request, response) => {
+      if (!mutationGuard(request, response)) return
+      try {
+        const id = requireExpertId(await readJsonBody(request))
+        // The card comes from the CURRENT scan table of the CURRENT source;
+        // an id that is not in the table (never installed, or its plugin
+        // degraded at scan time) is rejected before the roster is touched.
+        const rawSourcePath = currentSourcePath(hostCtx.settings)
+        const scan = await catalog.stateOf(rawSourcePath)
+        const card = scan.experts.find((expert) => expert.id === id)
+        if (card === undefined) throw new Error(`unknown expert id: ${id}`)
+        const result = await installWorkbuddyExpert(hostCtx.agentPresets, card, rawSourcePath)
+        sendJson(response, 200, { ok: true, ...result })
+      } catch (error) {
+        sendJson(response, 400, { error: errorMessage(error) })
       } finally {
         mutating = false
       }

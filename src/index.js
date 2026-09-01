@@ -8,10 +8,11 @@
  *                       as the raw `~`-prefixed string) + the watcher that
  *                       invalidates the scan cache;
  *   inject webServer + agentPresets + settings:
- *     src/routes.js     /dsh-workbuddy-market/api/{state,config,refresh}
- *                       over src/scanner.js via src/catalog.js — agentPresets
- *                       is listed because the install/update/uninstall
- *                       routes of the next tickets join this segment;
+ *     src/routes.js     /dsh-workbuddy-market/api/{state,config,refresh,
+ *                       install} over src/scanner.js via src/catalog.js, with
+ *                       src/presets.js behind the install route — the
+ *                       update/uninstall routes of later tickets join this
+ *                       same segment and its single-flight lane;
  *   inject tools + subagents + systemPrompt + agentPresets:
  *     src/summon.js     workbuddy_experts / summon_workbuddy_expert — the
  *                       P3 summon segment, deliberately absent until that

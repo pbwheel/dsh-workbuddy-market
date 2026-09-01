@@ -41,6 +41,24 @@
  *      allowed, revision conflict 409, validation), /api/refresh, 405/403
  *      rejection, the 4 KiB body cap, the mutating single-flight lane
  *      (concurrent second change → 409), and full disposal;
+ *   5b. install (ticket #5) against a mock roster over the same fixture
+ *      (the sister plugin's mock approach): the §4 seven steps' full product
+ *      set (preset.yml base fields, persona as a replaced single-line JSON
+ *      scalar, skills copied — including an EMPTY skill directory,
+ *      #15/#21 —, composition carrying customSkillDirs with the verbatim
+ *      !!js expression, manifest fields + fingerprint, roster user-trust
+ *      entry), the idempotent same-source reinstall (no diff, no
+ *      misreports), the two anchor patches' unit idempotency (pristine /
+ *      already-patched / extra-keys / CRLF forms, `$1`-safe replacers), the
+ *      degrade paths (persona anchor miss → base persona + warning;
+ *      skill-filesystem anchor miss → 「skills 未挂载」 warning + no skills
+ *      copied), the three error scenarios (foreign source / manifest
+ *      missing+corrupt / base missing), the post-copy-failure cleanup plus
+ *      the interrupted-reinstall wording and retry (decision #21),
+ *      route-level install (200/400/405/403, shared single-flight lane),
+ *      and — when a real harness is resolvable on this machine — both
+ *      anchors gated against the SHIPPED standard (pristine) and cordis
+ *      (already-patched) compositions;
  *   6. client bundle loads through a stub __ModuleLoader__ and mounts
  *      nothing (the market page is a later ticket);
  *   7. the schemastery resolver, when a real harness is present on this
@@ -52,7 +70,8 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
@@ -170,6 +189,9 @@ fixtureWrite('solo-one/rules/quality.md', [
 ].join('\n'))
 fixtureWrite('solo-one/skills/main-skill/SKILL.md', 'SKILL: main\n')
 fixtureWrite('solo-one/skills/references/data.md', 'reference data with no SKILL.md\n')
+// An EMPTY skill directory: copied verbatim per #15 (existence by stat, not
+// by fingerprint rows), contributing zero manifest rows.
+mkdirSync(join(fixtureRoot, 'solo-one', 'skills', 'empty-skill'), { recursive: true })
 fixtureWrite('solo-one/avatars/solo-one.png', FIXTURE_PNG)
 fixtureWrite('solo-one/.codebuddy-plugin/plugin.json', JSON.stringify({
   name: 'solo-one',
@@ -368,7 +390,7 @@ assert.deepEqual(
   assert.equal(soloOne.zhDescription, '来自 plugin.json 的中文描述。', 'zhDescription ← plugin.json displayDescription.zh')
   assert.ok(soloOne.avatarPath.endsWith(join('solo-one', 'avatars', 'solo-one.png')),
     'avatarPath ← plugin.json avatar (existence-checked)')
-  assert.deepEqual(soloOne.skills, ['main-skill', 'references'],
+  assert.deepEqual(soloOne.skills, ['empty-skill', 'main-skill', 'references'],
     'skills copies every subdirectory verbatim, including the one without SKILL.md (#15)')
   assert.equal(soloOne.teamSize, 1)
   assert.ok(soloOne.persona.includes('# 附加规则：rules/quality.md'), 'rules are appended under a title')
@@ -851,10 +873,11 @@ assert.deepEqual(
   [...server.routes.keys()].sort(),
   [
     'exact /dsh-workbuddy-market/api/config',
+    'exact /dsh-workbuddy-market/api/install',
     'exact /dsh-workbuddy-market/api/refresh',
     'exact /dsh-workbuddy-market/api/state',
   ],
-  'exactly the three T1 routes registered under the plugin prefix',
+  'the four routes shipped so far (state/config/refresh + T4 install) under the plugin prefix',
 )
 const stateRoute = server.routes.get('exact /dsh-workbuddy-market/api/state')
 const configRoute = server.routes.get('exact /dsh-workbuddy-market/api/config')
@@ -1056,6 +1079,478 @@ assert.equal(server.routes.size, 0, 'route disposer drops every registration')
 offRouteSettings()
 assert.equal(routeSettings.registrations.get(SETTINGS_NS).watchers.length, 0,
   'settings disposer drops the cache-invalidation watcher')
+
+// ── 5b. install (ticket #5): mock roster over the pathology fixture ─────────
+//
+// The mock roster mirrors the dsh-agent-presets contract the install flow
+// uses: list() entries with id/trust/path, whole-directory copy() that
+// writes the composition + preset.yml, remove() that deletes, and
+// standingKeyFor() recording the mount validation.
+
+const {
+  BASE_PRESET_ID, MANIFEST_FILE, PRESET_ID_PREFIX, computeInstallFingerprint,
+  installWorkbuddyExpert, patchPersonaText, patchSkillFilesystemRow, skillsManifestOf,
+} = await import(join(root, 'src', 'presets.js'))
+
+assert.equal(PRESET_ID_PREFIX, 'wb-', 'preset ids are namespaced under wb-')
+assert.equal(BASE_PRESET_ID, 'standard', 'the copy base is the standard composition')
+
+/** The composition a real standard copy lands as: persona row, other rows, PRISTINE skill-filesystem row. */
+const SAMPLE_COMPOSITION = [
+  '# comment header',
+  '',
+  "- id: persona",
+  "  name: '@deepseek-ai/dsh-persona'",
+  '  config:',
+  '    text: >-',
+  '      You are a coding agent powered by the {{model}} model. Your working directory is {{cwd}}.',
+  '',
+  '- id: agent-instructions',
+  "  name: '@deepseek-ai/dsh-agent-instructions'",
+  '  config:',
+  '    maxBytes: 65536',
+  '',
+  '- id: skill-filesystem',
+  "  name: '@deepseek-ai/dsh-skill-filesystem'",
+  '',
+  '- id: tool-skill',
+  "  name: '@deepseek-ai/dsh-tool-skill'",
+  '',
+].join('\n')
+
+/** The two-line customSkillDirs entry every patched row carries (#18: verbatim !!js expression). */
+const CUSTOM_DIRS_ENTRY_LINES = [
+  '    customSkillDirs:',
+  `      - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('skills/', baseUrl))"`,
+].join('\n')
+
+/** The full three-line block a pristine patch appends (config: header included). */
+const CUSTOM_DIRS_LINES = `  config:\n${CUSTOM_DIRS_ENTRY_LINES}`
+
+/**
+ * Mock roster (the sister plugin's approach). `composition` is what copy()
+ * lands; `withBase: false` simulates a deployment without the standard base;
+ * `failStanding` makes the mount validation throw (cleanup-path probe).
+ */
+function makeRoster({ composition = SAMPLE_COMPOSITION, withBase = true, failStanding = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-roster-'))
+  const entries = new Map()
+  const calls = { copy: [], remove: [], standing: [] }
+  if (withBase) {
+    entries.set('standard', { id: 'standard', trust: 'system', path: join(dir, 'standard', 'agent.cordis.yml') })
+  }
+  const roster = {
+    dir, entries, calls,
+    /** Flip mid-test to make the NEXT standingKeyFor throw (reinstall-interrupt probe). */
+    failStanding,
+    async list() { return [...entries.values()] },
+    async copy(from, id, name) {
+      assert.equal(from, BASE_PRESET_ID, 'copies always start from the standard base')
+      calls.copy.push(id)
+      const presetDir = join(dir, id)
+      mkdirSync(presetDir, { recursive: true })
+      writeFileSync(join(presetDir, 'agent.cordis.yml'), composition, 'utf8')
+      writeFileSync(join(presetDir, 'preset.yml'), `name: ${JSON.stringify(name ?? id)}\ndescription: base\n`, 'utf8')
+      entries.set(id, { id, trust: 'user', path: join(presetDir, 'agent.cordis.yml') })
+    },
+    async remove(id) {
+      calls.remove.push(id)
+      entries.delete(id)
+      rmSync(join(dir, id), { recursive: true, force: true })
+    },
+    async standingKeyFor(id) {
+      calls.standing.push(id)
+      if (roster.failStanding) throw new Error('mock mount failure')
+      return `scope:${id}`
+    },
+  }
+  return roster
+}
+
+/** Recursive sorted listing of one directory tree: [relativePath, content] pairs. */
+function treeOf(dir, prefix = '') {
+  const out = []
+  if (!existsSync(dir)) return out
+  for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (entry.name.startsWith('.')) continue
+    const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+    if (entry.isDirectory()) out.push(...treeOf(join(dir, entry.name), relative))
+    else out.push([relative, readFileSync(join(dir, entry.name), 'utf8')])
+  }
+  return out
+}
+
+/** Independent re-implementation of the fingerprint's skills slice (walk the SOURCE). */
+function smokeSkillsRows(rawRoot, card) {
+  const rows = []
+  const walk = (abs, relative) => {
+    for (const entry of readdirSync(abs, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      if (entry.name.startsWith('.')) continue
+      const next = relative === '' ? entry.name : `${relative}/${entry.name}`
+      if (entry.isDirectory()) walk(join(abs, entry.name), next)
+      else {
+        const info = statSync(join(abs, entry.name))
+        rows.push([next, info.size, info.mtimeMs])
+      }
+    }
+  }
+  for (const name of card.skills) walk(join(rawRoot, card.pluginDir, 'skills', name), name)
+  rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+  return rows
+}
+
+// 5b-1 · full seven-step install of a skills-carrying expert (solo-one).
+const roster = makeRoster()
+const soloOne = byId.get('solo-one')
+assert.ok(soloOne !== undefined && soloOne.agentFile === 'solo-one.md' && soloOne.pluginDir === 'solo-one',
+  'the scan card carries the install provenance fields')
+const first = await installWorkbuddyExpert(roster, soloOne, fixtureRoot)
+
+assert.equal(first.presetId, 'wb-solo-one')
+assert.equal(first.base, 'standard')
+assert.deepEqual(first.warnings, [], 'both anchors hit the sampled standard composition')
+assert.equal(first.fingerprint, computeInstallFingerprint(soloOne, smokeSkillsRows(fixtureRoot, soloOne)),
+  'fingerprint matches an independently walked skills manifest')
+assert.deepEqual(roster.calls.standing, ['wb-solo-one'], 'step ⑥ mount-validated the installed preset')
+{
+  // Roster acceptance — the picker's own data source: a user-trust entry
+  // with a locatable composition path, no broken reason.
+  const entry = roster.entries.get('wb-solo-one')
+  assert.equal(entry.trust, 'user', 'the installed preset is a roster user-trust entry')
+  assert.equal(typeof entry.path, 'string')
+  assert.equal(entry.broken, undefined)
+}
+
+const presetDir = join(roster.dir, 'wb-solo-one')
+const installedComposition = readFileSync(join(presetDir, 'agent.cordis.yml'), 'utf8')
+assert.ok(installedComposition.includes(`    text: ${JSON.stringify(soloOne.persona)}`),
+  'persona landed as a single-line JSON scalar at the anchored row')
+assert.ok(installedComposition.includes(`    text: ${JSON.stringify(soloOne.persona)}\n\n`),
+  'the replaced row is a single-line scalar followed by a blank line (re-matchable anchor)')
+assert.ok(!installedComposition.includes('You are a coding agent powered by'),
+  'the base folded persona is gone')
+assert.ok(installedComposition.includes(CUSTOM_DIRS_LINES),
+  'composition carries customSkillDirs with the verbatim !!js expression')
+assert.ok(!installedComposition.includes('customSkillDirs:\n      - /'),
+  'no foreign customSkillDirs entry remains')
+
+const installedYml = readFileSync(join(presetDir, 'preset.yml'), 'utf8')
+assert.ok(installedYml.includes(`name: ${JSON.stringify(soloOne.name)}`), 'preset.yml carries the card base name')
+assert.ok(installedYml.includes(`description: ${JSON.stringify(soloOne.description)}`),
+  'preset.yml carries the card base description')
+
+assert.deepEqual(
+  treeOf(join(presetDir, 'skills')).map(([relative]) => relative),
+  ['main-skill/SKILL.md', 'references/data.md'],
+  'both file-carrying skill directories copied verbatim (references/ has no SKILL.md, #15)',
+)
+assert.equal(existsSync(join(presetDir, 'skills', 'empty-skill')), true,
+  'the EMPTY skill directory copies too — existence by stat, never by fingerprint rows (#15/#21)')
+assert.equal(readFileSync(join(presetDir, 'skills', 'references', 'data.md'), 'utf8'),
+  'reference data with no SKILL.md\n', 'skill file content is byte-identical')
+if (process.platform !== 'win32') {
+  // Added paths keep the roster's owner-only posture (dsh-agent-presets
+  // tightens its own copy the same way; our additions must not loosen it).
+  assert.equal(statSync(join(presetDir, MANIFEST_FILE)).mode & 0o777, 0o600,
+    'manifest is owner-only')
+  assert.equal(statSync(join(presetDir, 'skills')).mode & 0o777, 0o700,
+    'skills directories are owner-only')
+  assert.equal(statSync(join(presetDir, 'skills', 'main-skill', 'SKILL.md')).mode & 0o777, 0o600,
+    'skill files are owner-only')
+}
+
+const manifest = JSON.parse(readFileSync(join(presetDir, MANIFEST_FILE), 'utf8'))
+assert.deepEqual(Object.keys(manifest).sort(),
+  ['agentFile', 'fingerprint', 'importedAt', 'pluginDir', 'sourcePath'],
+  'manifest carries exactly the designed fields')
+assert.equal(manifest.sourcePath, fixtureRoot, 'manifest records the RAW source path')
+assert.equal(manifest.pluginDir, 'solo-one')
+assert.equal(manifest.agentFile, 'solo-one.md')
+assert.equal(manifest.fingerprint, first.fingerprint, 'manifest fingerprint = the install fingerprint')
+assert.ok(!Number.isNaN(Date.parse(manifest.importedAt)), 'importedAt is a parseable timestamp')
+
+// 5b-2 · same-source reinstall is idempotent: identical products, no warnings.
+const beforeTree = treeOf(presetDir).filter(([relative]) => relative !== MANIFEST_FILE)
+const second = await installWorkbuddyExpert(roster, soloOne, fixtureRoot)
+assert.deepEqual(second.warnings, [], 'reinstall raises no 「skills 未挂载」 false positive (already-patched branch)')
+assert.equal(second.fingerprint, first.fingerprint, 'fingerprint stable across reinstalls')
+assert.deepEqual(
+  treeOf(presetDir).filter(([relative]) => relative !== MANIFEST_FILE),
+  beforeTree,
+  'reinstall leaves every persisted product byte-identical (manifest aside)',
+)
+assert.deepEqual(roster.calls.remove, ['wb-solo-one'], 'reinstall went remove → re-copy, never overwriting')
+// A differently SPELLED but same directory source is still the same source.
+const third = await installWorkbuddyExpert(roster, soloOne, `${fixtureRoot}/`)
+assert.deepEqual(third.warnings, [], 'trailing-slash source spelling is the same source (path normalization)')
+
+// 5b-3 · anchor patch units: pristine / already-patched / extra keys / CRLF / $-safe.
+{
+  const pristine = patchSkillFilesystemRow(SAMPLE_COMPOSITION)
+  assert.equal(pristine.form, 'pristine')
+  assert.equal(pristine.changed, true)
+  assert.ok(pristine.text.includes(CUSTOM_DIRS_LINES))
+  const again = patchSkillFilesystemRow(pristine.text)
+  assert.equal(again.form, 'patched')
+  assert.equal(again.changed, false, 'second execution over our own output: no diff')
+  assert.equal(again.text, pristine.text)
+
+  // A row carrying OTHER config keys plus a foreign customSkillDirs: the
+  // entry is replaced in place, the other key survives, rerun is stable.
+  const foreignRow = SAMPLE_COMPOSITION.replace(
+    "- id: skill-filesystem\n  name: '@deepseek-ai/dsh-skill-filesystem'\n",
+    "- id: skill-filesystem\n  name: '@deepseek-ai/dsh-skill-filesystem'\n"
+    + '  config:\n    someFutureKey: 1\n    customSkillDirs:\n      - /old/absolute/path\n',
+  )
+  const merged = patchSkillFilesystemRow(foreignRow)
+  assert.equal(merged.form, 'patched')
+  assert.equal(merged.changed, true)
+  assert.ok(merged.text.includes('someFutureKey: 1'), 'foreign config keys survive the in-place replace')
+  assert.ok(merged.text.includes(CUSTOM_DIRS_ENTRY_LINES), 'our entry replaced the foreign one in place')
+  assert.ok(!merged.text.includes('/old/absolute/path'))
+  assert.equal(patchSkillFilesystemRow(merged.text).changed, false, 'merged form reruns with no diff')
+
+  // CRLF row form still anchors (the insert itself stays LF, like the persona patch).
+  const crlfPatched = patchSkillFilesystemRow(SAMPLE_COMPOSITION.replace(/\n/g, '\r\n'))
+  assert.ok(crlfPatched !== null && crlfPatched.changed)
+  assert.ok(crlfPatched.text.includes(CUSTOM_DIRS_LINES))
+
+  // `$1`-safety: a persona carrying replace metacharacters survives verbatim.
+  const dollarPersona = 'Use $1, $&, $$ and $` carefully in SQL and regex examples.'
+  const dollarPatched = patchPersonaText(SAMPLE_COMPOSITION, dollarPersona)
+  assert.ok(dollarPatched !== null && dollarPatched.includes(`    text: ${JSON.stringify(dollarPersona)}\n\n`),
+    'persona $-sequences are never interpreted as replacement patterns')
+
+  // Anchor misses degrade to null (composition drift), never a broken patch.
+  assert.equal(patchPersonaText(SAMPLE_COMPOSITION.replace('- id: persona', '- id: persona-x'), 'p'), null)
+  assert.equal(patchSkillFilesystemRow(SAMPLE_COMPOSITION.replace('- id: skill-filesystem', '- id: nope')), null)
+}
+
+// 5b-4 · persona anchor miss → warning + base persona, preset still installs.
+{
+  const driftRoster = makeRoster({ composition: SAMPLE_COMPOSITION.replace('- id: persona', '- id: persona-x') })
+  const drifted = await installWorkbuddyExpert(driftRoster, soloOne, fixtureRoot)
+  assert.deepEqual(drifted.warnings.filter((warning) => warning.includes('persona row not found')).length, 1,
+    'persona anchor miss degrades to exactly one warning')
+  const kept = readFileSync(join(driftRoster.dir, 'wb-solo-one', 'agent.cordis.yml'), 'utf8')
+  assert.ok(kept.includes('You are a coding agent powered by'),
+    'the base persona stays in place — the preset is never broken')
+  assert.ok(!kept.includes(JSON.stringify(soloOne.persona)), 'the unmatched persona was not written')
+  assert.equal(drifted.fingerprint, first.fingerprint,
+    'fingerprint stays source-true even on the degraded persona path')
+  rmSync(driftRoster.dir, { recursive: true, force: true })
+}
+
+// 5b-5 · skill-filesystem anchor miss → warning + no skills copied.
+{
+  const noRowRoster = makeRoster({ composition: SAMPLE_COMPOSITION.replace(/- id: skill-filesystem\n.+\n/, '') })
+  const noRow = await installWorkbuddyExpert(noRowRoster, soloOne, fixtureRoot)
+  assert.deepEqual(noRow.warnings.filter((warning) => warning.includes('skills 未挂载')).length, 1,
+    'skills anchor miss degrades to the designed 「skills 未挂载」 warning')
+  assert.equal(existsSync(join(noRowRoster.dir, 'wb-solo-one', 'skills')), false,
+    'unmounted skills are not copied into the preset')
+  assert.equal(noRow.fingerprint, first.fingerprint,
+    'the fingerprint still covers the card skills (source-true updatable semantics)')
+  rmSync(noRowRoster.dir, { recursive: true, force: true })
+}
+
+// 5b-6 · foreign source / manifest missing / manifest corrupt.
+{
+  // A second source carrying the same expert id under a different plugin dir.
+  const sourceB = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-srcb-'))
+  const writeB = (relative, content) => {
+    const path = join(sourceB, relative)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, content)
+  }
+  writeB('other-origin/agents/other-origin.md', [
+    '---',
+    'name: solo-one',
+    'description: Same id from a different source.',
+    '---',
+    '',
+    'Different persona entirely.',
+    '',
+  ].join('\n'))
+  writeB('other-origin/.codebuddy-plugin/plugin.json', JSON.stringify({ name: 'other-origin' }))
+  const cardB = (await scanWorkbuddyRoot(sourceB)).experts.find((expert) => expert.id === 'solo-one')
+  assert.ok(cardB !== undefined, 'source B scans the shared id')
+  await assert.rejects(
+    () => installWorkbuddyExpert(roster, cardB, sourceB),
+    /该专家已从别的源目录安装/,
+    'foreign-source collision reports the designed error',
+  )
+  assert.ok(roster.entries.has('wb-solo-one'), 'the collision leaves the installed preset untouched')
+  rmSync(sourceB, { recursive: true, force: true })
+
+  const manifestPath = join(presetDir, MANIFEST_FILE)
+  const savedManifest = readFileSync(manifestPath, 'utf8')
+  const removesBeforeErrors = roster.calls.remove.length
+  rmSync(manifestPath)
+  await assert.rejects(() => installWorkbuddyExpert(roster, soloOne, fixtureRoot), /清单缺失，请卸载重装/,
+    'missing manifest is the designed error')
+  writeFileSync(manifestPath, '{ not json')
+  await assert.rejects(() => installWorkbuddyExpert(roster, soloOne, fixtureRoot), /清单缺失，请卸载重装/,
+    'corrupt manifest is the same designed error')
+  writeFileSync(manifestPath, savedManifest)
+  assert.equal(roster.calls.remove.length, removesBeforeErrors,
+    'none of the error paths removed or replaced the installed preset')
+}
+
+// 5b-7 · base missing → error, no half products; post-copy failure → cleanup.
+{
+  const noBase = makeRoster({ withBase: false })
+  await assert.rejects(() => installWorkbuddyExpert(noBase, soloOne, fixtureRoot), /base preset not found: standard/,
+    'missing base is reported before anything is created')
+  assert.deepEqual(noBase.calls.copy, [], 'copy never ran')
+  assert.deepEqual(readdirSync(noBase.dir).filter((name) => name.startsWith('wb-')), [],
+    'no half-made preset directory remains')
+
+  const failStanding = makeRoster({ failStanding: true })
+  await assert.rejects(() => installWorkbuddyExpert(failStanding, soloOne, fixtureRoot), /mock mount failure/,
+    'a mount-validation failure propagates')
+  assert.equal(existsSync(join(failStanding.dir, 'wb-solo-one')), false,
+    'the failed install removed the preset it had created (no half products)')
+  assert.equal(failStanding.entries.has('wb-solo-one'), false, 'roster no longer reports it')
+
+  // A failed REINSTALL reports that the previous install was removed at its
+  // start (decision #21) — and a retry restores the working install.
+  roster.failStanding = true
+  await assert.rejects(
+    () => installWorkbuddyExpert(roster, soloOne, fixtureRoot),
+    (error) => /mock mount failure/.test(error.message) && /重装中断/.test(error.message),
+    'an interrupted reinstall keeps the original cause and says the old install is gone',
+  )
+  assert.equal(roster.entries.has('wb-solo-one'), false, 'the interrupted reinstall left no half product')
+  roster.failStanding = false
+  const restored = await installWorkbuddyExpert(roster, soloOne, fixtureRoot)
+  assert.equal(restored.presetId, 'wb-solo-one')
+  assert.equal(restored.fingerprint, first.fingerprint, 'the retry restores the identical install')
+  rmSync(noBase.dir, { recursive: true, force: true })
+  rmSync(failStanding.dir, { recursive: true, force: true })
+}
+
+// 5b-8 · route-level install through the fake webServer: guards, lane, shapes.
+{
+  const server2 = makeFakeServer()
+  const roster2 = makeRoster()
+  const settings2 = makeFakeSettings()
+  const catalog2 = createCatalog(async () => ({ experts: [soloOne], warnings: [] }))
+  const offSettings2 = mountWorkbuddySettings(settings2, fakeZ, catalog2)
+  // Pin the namespace to the fixture BEFORE any install runs through the
+  // route — the registered base is the machine-dependent real corpus path.
+  await settings2.update(SETTINGS_NS, { sourcePath: fixtureRoot })
+  const offRoutes2 = mountWorkbuddyMarketRoutes(
+    { webServer: server2, settings: settings2, agentPresets: roster2 },
+    { catalog: catalog2 },
+  )
+  const installRoute = server2.routes.get('exact /dsh-workbuddy-market/api/install')
+  assert.ok(installRoute !== undefined, 'install route registered under the plugin prefix')
+  assert.equal((await handle(installRoute, makeRequest({ method: 'GET', headers: SAME_ORIGIN }))).response.status, 405,
+    'non-POST install rejected with 405')
+  assert.equal((await handle(installRoute, makeRequest({ method: 'POST' }))).response.status, 403,
+    'origin-less install rejected with 403')
+
+  const ok = await handle(installRoute, makeRequest({
+    method: 'POST', headers: SAME_ORIGIN,
+    chunks: [Buffer.from(JSON.stringify({ id: 'solo-one' }))],
+  }))
+  assert.equal(ok.response.status, 200, `route install succeeds: ${ok.response.body}`)
+  assert.equal(ok.response.headers['cache-control'], 'no-store')
+  assert.equal(ok.payload.ok, true)
+  assert.equal(ok.payload.presetId, 'wb-solo-one')
+
+  const unknown = await handle(installRoute, makeRequest({
+    method: 'POST', headers: SAME_ORIGIN,
+    chunks: [Buffer.from(JSON.stringify({ id: 'no-such-expert' }))],
+  }))
+  assert.equal(unknown.response.status, 400)
+  assert.match(unknown.payload.error, /unknown expert id/)
+  for (const chunks of [[Buffer.from('{ not json')], [Buffer.from(JSON.stringify({}))]]) {
+    const bad = await handle(installRoute, makeRequest({ method: 'POST', headers: SAME_ORIGIN, chunks }))
+    assert.equal(bad.response.status, 400, 'bodies without an id string are rejected')
+  }
+
+  // The install route shares the mutating single-flight lane with config.
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const heldRequest = {
+    method: 'POST',
+    url: '/dsh-workbuddy-market/api/install',
+    headers: SAME_ORIGIN,
+    [Symbol.asyncIterator]: async function* () {
+      await gate
+      yield Buffer.from(JSON.stringify({ id: 'solo-one' }))
+    },
+  }
+  const heldResponse = makeResponse()
+  const heldCall = installRoute.handler(heldRequest, heldResponse)
+  const configRoute2 = server2.routes.get('exact /dsh-workbuddy-market/api/config')
+  const during = await handle(configRoute2, makeRequest({
+    method: 'POST', headers: SAME_ORIGIN,
+    chunks: [Buffer.from(JSON.stringify({ sourcePath: fixtureRoot }))],
+  }))
+  assert.equal(during.response.status, 409, 'an in-flight install holds the shared mutation lane')
+  release()
+  await heldCall
+  assert.equal(heldResponse.status, 200, 'the held install completed after release')
+
+  offRoutes2()
+  assert.equal(server2.routes.size, 0)
+  offSettings2()
+  rmSync(roster2.dir, { recursive: true, force: true })
+}
+
+// 5b-9 · gate both anchors against the SHIPPED compositions when a real
+// harness is resolvable on this machine (skipped with a note otherwise).
+{
+  const require = (() => {
+    const anchors = []
+    if (typeof process.env.DSH_HOME === 'string' && process.env.DSH_HOME !== '') {
+      anchors.push(join(process.env.DSH_HOME, 'profiles', 'package.json'))
+    }
+    anchors.push(join(homedir(), '.dsh', 'profiles', 'package.json'))
+    for (const anchor of anchors) {
+      try {
+        return createRequire(anchor)
+      } catch {
+        // try the next anchor
+      }
+    }
+    return null
+  })()
+  let dshRoot = null
+  if (require !== null) {
+    try {
+      dshRoot = dirname(require.resolve('@deepseek-ai/dsh/package.json'))
+    } catch {
+      dshRoot = null
+    }
+  }
+  if (dshRoot === null) {
+    console.log('smoke: no resolvable dsh install here — shipped-preset anchor gate skipped (covered by the scratch-profile run)')
+  } else {
+    const standardText = readFileSync(join(dshRoot, 'config', 'agent-presets', 'standard', 'agent.cordis.yml'), 'utf8')
+    const cordisText = readFileSync(join(dshRoot, 'config', 'agent-presets', 'cordis', 'agent.cordis.yml'), 'utf8')
+    const personaGate = patchPersonaText(standardText, '锚定冒烟专家')
+    assert.ok(personaGate !== null, 'persona anchor hits the REAL shipped standard composition')
+    assert.ok(personaGate.includes('锚定冒烟专家'))
+    const standardGate = patchSkillFilesystemRow(standardText)
+    assert.ok(standardGate !== null && standardGate.form === 'pristine',
+      'skill-filesystem anchor hits the real standard row in its pristine form')
+    assert.ok(standardGate.text.includes(CUSTOM_DIRS_LINES),
+      'our produced block is byte-identical to the shipped cordis preset lines')
+    assert.ok(cordisText.includes(CUSTOM_DIRS_LINES),
+      'the shipped cordis preset carries exactly those lines (verbatim #18 source)')
+    const cordisGate = patchSkillFilesystemRow(cordisText)
+    assert.equal(cordisGate.form, 'patched')
+    assert.equal(cordisGate.changed, false, 'the shipped cordis form (already patched) reruns with NO diff')
+    assert.equal(cordisGate.text, cordisText)
+    console.log('smoke: both anchors gated against the shipped standard/cordis compositions — verbatim forms confirmed')
+  }
+}
+
+rmSync(join(roster.dir), { recursive: true, force: true })
 
 rmSync(fixtureDir, { recursive: true, force: true })
 rmSync(fixtureRoot, { recursive: true, force: true })

@@ -32,6 +32,8 @@
  *                team card: `avatars/<agentName>.png` exact → `team.png` →
  *                first PNG (decision #13) → undefined (client emoji fallback)
  *   pluginDir    ← plugin directory name (provenance badge)
+ *   agentFile    ← the card's agent md file name inside agents/ (install
+ *                provenance — the fingerprint manifest records it, ticket #5)
  *   teamSize     ← number of agent files in the plugin directory
  *
  * BODY-H1 EXTENSION (decision #19, additive): the real corpus has 4 experts
@@ -493,6 +495,7 @@ async function scanPluginDirectory(pluginDir) {
         skills: [...skills],
         avatarPath,
         pluginDir: pluginName,
+        agentFile: file,
         teamSize: agentFiles.length,
       })
     } catch (error) {

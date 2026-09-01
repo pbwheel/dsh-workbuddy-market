@@ -78,8 +78,12 @@ import { errorMessage } from './util.js'
 /** Default WorkBuddy experts directory, stored/echoed verbatim (#18). */
 export const DEFAULT_SOURCE_PATH = '~/.workbuddy/plugins/marketplaces/experts/plugins'
 
-/** The roster's own id rule; the card id names the future `wb-<id>` preset. */
-const ID_RE = /^[a-z0-9][a-z0-9-]*$/
+/**
+ * The roster's own id rule; the card id names the future `wb-<id>` preset.
+ * Exported since T6: the avatar route accepts the SAME charset (one source
+ * of truth — the route can never grow an id class the scanner rejects).
+ */
+export const ID_RE = /^[a-z0-9][a-z0-9-]*$/
 
 /**
  * Prompt variables the running harness registers (dsh-agent-loop registers

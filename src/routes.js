@@ -1,10 +1,26 @@
 /**
  * HTTP routes bridging the (future) browser market page to the host. T1
- * shipped the three skeleton routes; T4 (ticket #5) adds the install route:
+ * shipped the three skeleton routes; T4 (ticket #5) added the install route;
+ * T6 (ticket #7) adds the avatar stream:
  *
  *   GET  /dsh-workbuddy-market/api/state  → { sourcePath, pathExists,
  *                                             revision, experts, orphans,
- *                                             warnings } (no-store);
+ *                                             warnings } (no-store); expert
+ *                                             cards carry avatarUrl (only
+ *                                             when the scan found a PNG —
+ *                                             PNG-less experts have neither
+ *                                             avatarUrl nor avatarPath);
+ *   GET  /dsh-workbuddy-market/api/avatar?id=<id>
+ *                                     → the expert's PNG read on demand from
+ *                                       the CURRENT scan table (never copied),
+ *                                       image/png + max-age=60; the id must
+ *                                       pass the scanner's ID_RE, hit the
+ *                                       table, and its avatarPath must
+ *                                       realpath inside the source root —
+ *                                       unknown/invalid/escaping ids all
+ *                                       answer one uniform 404 (no probe
+ *                                       signal), and read failures 404 the
+ *                                       same way;
  *   POST /dsh-workbuddy-market/api/config { sourcePath, expectedRevision }
  *                                     → save the RAW path string through the
  *                                       SERVICE-level settings update (revision
@@ -27,13 +43,18 @@
  * The single-flight lane is shared by every mutating route of this plugin
  * (roster copies are not concurrency-safe); the update/uninstall routes of
  * later tickets join the same lane. Installs are file copies plus text
- * edits — no script ever runs.
+ * edits — no script ever runs. The avatar route is a GET read: no origin
+ * check, no lane — its only guard is the id/containment chain above, and it
+ * is the ONE response allowed to cache (max-age=60, the design's sole
+ * exception to no-store; a source PNG mtime change moves the fingerprint,
+ * the rescan swaps the bytes, and the 60s window absorbs itself).
  */
 
-import { stat } from 'node:fs/promises'
+import { readFile, realpath, stat } from 'node:fs/promises'
+import { isAbsolute, relative, sep } from 'node:path'
 
 import { installWorkbuddyExpert } from './presets.js'
-import { expandTildePath } from './scanner.js'
+import { ID_RE, expandTildePath } from './scanner.js'
 import { SETTINGS_NS, namespaceDescriptor } from './settings.js'
 import { errorMessage } from './util.js'
 
@@ -84,9 +105,36 @@ async function pathExists(rawSourcePath) {
 }
 
 /**
+ * True when a fully resolved candidate path sits strictly inside a fully
+ * resolved root. Both inputs must already be realpath'd — the route resolves
+ * both sides through the filesystem itself, so `..` segments AND symlinks
+ * (a declared plugin.json avatar may be either) are undone before the
+ * prefix test; a leading `../` or an absolute escape means "outside".
+ */
+function isWithinRoot(rootReal, candidateReal) {
+  const rel = relative(rootReal, candidateReal)
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)
+}
+
+/**
+ * One state-payload expert card: the scan card minus the internal absolute
+ * `avatarPath`, plus `avatarUrl` — but ONLY for experts the scan gave a PNG.
+ * PNG-less experts carry neither field (the client's emoji fallback is the
+ * next ticket). Ids are ID_RE-constrained by the scanner, so the URL needs
+ * no percent-encoding.
+ */
+function stateCardOf(expert) {
+  const { avatarPath, ...card } = expert
+  return avatarPath === undefined
+    ? card
+    : { ...card, avatarUrl: `${ROUTE_BASE}/api/avatar?id=${expert.id}` }
+}
+
+/**
  * Compose one `/api/state` payload: raw stored path (tilde intact, #18),
  * its existence flag, the settings revision for conflict protection, the
- * (currently empty) expert table, and warnings.
+ * expert table (cards via `stateCardOf` — avatarUrl only where the scan
+ * found a PNG), and warnings.
  * @param {object} deps - { settingsService, catalog }
  * @returns {Promise<object>} the state payload
  */
@@ -101,7 +149,7 @@ async function buildState({ settingsService, catalog }) {
     sourcePath: rawSourcePath,
     pathExists: exists,
     revision: descriptor.revision,
-    experts: scan.experts,
+    experts: scan.experts.map(stateCardOf),
     // Orphan detection (installed wb-* presets missing from the current
     // source) reads the roster; it lands with the install ticket, and the
     // field ships now so the state shape matches the API table from day one.
@@ -149,6 +197,19 @@ export function mountWorkbuddyMarketRoutes(hostCtx, { catalog }) {
   /** What buildState reads: the injected settings service plus the shared scan cache. */
   const deps = { settingsService: hostCtx.settings, catalog }
 
+  /** The RAW stored source path (tilde intact, #18) every scan-facing caller reads. */
+  const rawSourcePathOf = () => currentSourcePath(hostCtx.settings)
+
+  /**
+   * The CURRENT scan table's card for one expert id (undefined when absent)
+   * — the shared lookup of the avatar and install routes; later tickets'
+   * update/uninstall routes join here.
+   */
+  const currentCardOf = async (id) => {
+    const scan = await deps.catalog.stateOf(rawSourcePathOf())
+    return scan.experts.find((expert) => expert.id === id)
+  }
+
   /** One mutating operation at a time; roster copies (later tickets) are not concurrency-safe. */
   let mutating = false
 
@@ -180,6 +241,68 @@ export function mountWorkbuddyMarketRoutes(hostCtx, { catalog }) {
       }
       try {
         sendJson(response, 200, await buildState(deps))
+      } catch (error) {
+        sendJson(response, 500, { error: errorMessage(error) })
+      }
+    },
+  })
+
+  register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/api/avatar`,
+    handler: async (request, response) => {
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        sendJson(response, 405, { error: 'method not allowed' })
+        return
+      }
+      // Every miss answers ONE uniform 404 — unknown id, charset reject,
+      // PNG-less expert, out-of-root resolution, vanished file — so the
+      // route cannot be probed for which ids exist.
+      const notFound = () => sendJson(response, 404, { error: 'not found' })
+      let id = null
+      try {
+        id = new URL(request.url ?? '/', 'http://internal.invalid').searchParams.get('id')
+      } catch {
+        id = null
+      }
+      if (typeof id !== 'string' || !ID_RE.test(id)) {
+        notFound()
+        return
+      }
+      try {
+        // The card comes from the CURRENT scan table (through the catalog's
+        // fingerprint cache, never a private rescan) — an id that is not in
+        // the table has no avatar to serve.
+        const card = await currentCardOf(id)
+        if (card === undefined || typeof card.avatarPath !== 'string' || card.avatarPath === '') {
+          notFound()
+          return
+        }
+        // Containment on REAL paths: realpath undoes `..` and symlink hops
+        // on both sides, so a declared avatar spelled or linked anywhere
+        // outside the source root fails the check. A missing/unreadable
+        // root or file resolves to null and 404s like any other miss.
+        const rootReal = await realpath(expandTildePath(rawSourcePathOf())).catch(() => null)
+        const avatarReal = await realpath(card.avatarPath).catch(() => null)
+        if (rootReal === null || avatarReal === null || !isWithinRoot(rootReal, avatarReal)) {
+          notFound()
+          return
+        }
+        // Corpus PNGs are a few hundred KiB at most — a single Buffer read
+        // is the stream here (design §5: read on demand, never copy). A
+        // read that fails after containment (vanished mid-race, EACCES)
+        // 404s like every other miss — the uniform body leaks no detail.
+        const bytes = await readFile(avatarReal).catch(() => null)
+        if (bytes === null) {
+          notFound()
+          return
+        }
+        response.writeHead(200, {
+          'content-type': 'image/png',
+          'cache-control': 'max-age=60',
+          'content-length': String(bytes.length),
+        })
+        response.end(bytes)
       } catch (error) {
         sendJson(response, 500, { error: errorMessage(error) })
       }
@@ -248,9 +371,8 @@ export function mountWorkbuddyMarketRoutes(hostCtx, { catalog }) {
         // The card comes from the CURRENT scan table of the CURRENT source;
         // an id that is not in the table (never installed, or its plugin
         // degraded at scan time) is rejected before the roster is touched.
-        const rawSourcePath = currentSourcePath(hostCtx.settings)
-        const scan = await catalog.stateOf(rawSourcePath)
-        const card = scan.experts.find((expert) => expert.id === id)
+        const rawSourcePath = rawSourcePathOf()
+        const card = await currentCardOf(id)
         if (card === undefined) throw new Error(`unknown expert id: ${id}`)
         const result = await installWorkbuddyExpert(hostCtx.agentPresets, card, rawSourcePath)
         sendJson(response, 200, { ok: true, ...result })

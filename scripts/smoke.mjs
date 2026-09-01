@@ -59,6 +59,17 @@
  *      and — when a real harness is resolvable on this machine — both
  *      anchors gated against the SHIPPED standard (pristine) and cordis
  *      (already-patched) compositions;
+ *   5c. avatar route (ticket #7): byte-exact PNG streams off the pathology
+ *      fixture (a declared plugin.json avatar + a team member's own PNG)
+ *      with image/png + max-age=60 + content-length, the uniform-404
+ *      matrix (unknown id, ID_RE rejects of every spelling, missing/empty
+ *      id param, PNG-less expert) answering ONE identical no-detail body,
+ *      state cards carrying avatarUrl only for PNG-bearing experts (the
+ *      internal absolute avatarPath never leaks), and — over a dedicated
+ *      escape fixture whose DECLARED plugin.json avatars (a `..` relative
+ *      path; a symlink where the platform has them) really resolve outside
+ *      the source root — both escapes 404 while an innocent avatar in the
+ *      same tree still serves byte-identical bytes;
  *   6. client bundle loads through a stub __ModuleLoader__ and mounts
  *      nothing (the market page is a later ticket);
  *   7. the schemastery resolver, when a real harness is present on this
@@ -70,10 +81,10 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir, tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { readFile } from 'node:fs/promises'
 
 const root = new URL('..', import.meta.url).pathname
@@ -834,11 +845,23 @@ function makeFakeServer() {
   }
 }
 
-/** Duck-typed ServerResponse capturing status/headers/body. */
+/**
+ * Duck-typed ServerResponse capturing status/headers/body. Chunks keep
+ * their kind: string chunks feed the `body` text view (JSON payloads, so
+ * `handle` keeps parsing), while `buffer` concatenates every chunk's bytes
+ * in order — the avatar route's binary bodies are asserted byte-exactly
+ * through it (an implicit toString would silently corrupt them).
+ */
 function makeResponse() {
-  const res = { status: null, headers: null, body: '', ended: false }
+  const res = { status: null, headers: null, chunks: [], ended: false }
   res.writeHead = (status, headers) => { res.status = status; res.headers = headers }
-  res.end = (chunk) => { if (chunk !== undefined && chunk !== null) res.body += chunk; res.ended = true }
+  res.end = (chunk) => { if (chunk !== undefined && chunk !== null) res.chunks.push(chunk); res.ended = true }
+  Object.defineProperty(res, 'body', {
+    get: () => res.chunks.map((chunk) => (typeof chunk === 'string' ? chunk : '')).join(''),
+  })
+  Object.defineProperty(res, 'buffer', {
+    get: () => Buffer.concat(res.chunks.map((chunk) => (Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')))),
+  })
   return res
 }
 
@@ -872,14 +895,16 @@ const offRoutes = mountWorkbuddyMarketRoutes(
 assert.deepEqual(
   [...server.routes.keys()].sort(),
   [
+    'exact /dsh-workbuddy-market/api/avatar',
     'exact /dsh-workbuddy-market/api/config',
     'exact /dsh-workbuddy-market/api/install',
     'exact /dsh-workbuddy-market/api/refresh',
     'exact /dsh-workbuddy-market/api/state',
   ],
-  'the four routes shipped so far (state/config/refresh + T4 install) under the plugin prefix',
+  'the five routes shipped so far (state/avatar/config/refresh + T4 install) under the plugin prefix',
 )
 const stateRoute = server.routes.get('exact /dsh-workbuddy-market/api/state')
+const avatarRoute = server.routes.get('exact /dsh-workbuddy-market/api/avatar')
 const configRoute = server.routes.get('exact /dsh-workbuddy-market/api/config')
 const refreshRoute = server.routes.get('exact /dsh-workbuddy-market/api/refresh')
 
@@ -982,6 +1007,63 @@ const fixtureDir = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-smoke-'))
   assert.equal(routeScanCalls.length, scansBefore + 1, 'a fixture edit forces the next /api/state to rescan')
   assert.ok(payload.experts.some((expert) => expert.id === 'route-added'),
     'the new card surfaces through the route without any refresh call')
+}
+
+// T6 avatar over the pathology fixture (sourcePath still points here): byte
+// streams, the uniform-404 matrix, and the state card's avatarUrl shape.
+{
+  // 200 hits: a declared plugin.json avatar (solo-one) and a team member's
+  // own PNG (team-x-maker, never team.png/first PNG) both serve bytes
+  // byte-identical to the source files, with the designed headers.
+  for (const [id, sourceRelative] of [
+    ['solo-one', join('solo-one', 'avatars', 'solo-one.png')],
+    ['team-x-maker', join('team-x', 'avatars', 'team-x-maker.png')],
+  ]) {
+    const source = readFileSync(join(fixtureRoot, sourceRelative))
+    const { response } = await handle(avatarRoute,
+      makeRequest({ url: `/dsh-workbuddy-market/api/avatar?id=${id}` }))
+    assert.equal(response.status, 200, `${id}: known id with a PNG is a hit`)
+    assert.equal(response.headers['content-type'], 'image/png', `${id}: content-type is image/png`)
+    assert.equal(response.headers['cache-control'], 'max-age=60',
+      `${id}: the design's sole caching exception (every JSON route is no-store)`)
+    assert.equal(response.headers['content-length'], String(source.length), `${id}: content-length matches`)
+    assert.ok(response.buffer.equals(source), `${id}: served bytes are identical to the source file`)
+  }
+
+  // One uniform 404 — unknown id, every ID_RE reject spelling, missing or
+  // empty id param, PNG-less expert — and ONE identical body, so the route
+  // leaks nothing about which ids exist.
+  for (const [label, url] of [
+    ['unknown id', '/dsh-workbuddy-market/api/avatar?id=no-such-expert'],
+    ['uppercase id', '/dsh-workbuddy-market/api/avatar?id=SOLO-ONE'],
+    ['dotdot id', '/dsh-workbuddy-market/api/avatar?id=../solo-one'],
+    ['encoded-slash id', '/dsh-workbuddy-market/api/avatar?id=solo%2Fone'],
+    ['id with a space', '/dsh-workbuddy-market/api/avatar?id=solo%20one'],
+    ['id with a plus', '/dsh-workbuddy-market/api/avatar?id=solo+one'],
+    ['empty id', '/dsh-workbuddy-market/api/avatar?id='],
+    ['missing id param', '/dsh-workbuddy-market/api/avatar'],
+    ['PNG-less expert', '/dsh-workbuddy-market/api/avatar?id=dup-expert'],
+  ]) {
+    const { response, payload } = await handle(avatarRoute, makeRequest({ url }))
+    assert.equal(response.status, 404, `${label} → 404`)
+    assert.deepEqual(payload, { error: 'not found' }, `${label}: the uniform body carries no distinguishing detail`)
+  }
+  assert.equal((await handle(avatarRoute,
+    makeRequest({ method: 'POST', url: '/dsh-workbuddy-market/api/avatar?id=solo-one' }))).response.status, 405,
+    'non-GET avatar rejected with 405 (state-route parity)')
+
+  // State shape: avatarUrl only where the scan found a PNG; the internal
+  // absolute avatarPath never reaches the client payload.
+  const { payload } = await handle(stateRoute, makeRequest({ url: '/dsh-workbuddy-market/api/state' }))
+  const soloOneCard = payload.experts.find((expert) => expert.id === 'solo-one')
+  assert.equal(soloOneCard.avatarUrl, '/dsh-workbuddy-market/api/avatar?id=solo-one',
+    'an avatared expert carries its avatarUrl')
+  assert.equal('avatarPath' in soloOneCard, false, 'avatarPath is internal — state exposes avatarUrl only')
+  for (const id of ['dup-expert', 'solo-three']) {
+    const card = payload.experts.find((expert) => expert.id === id)
+    assert.equal('avatarUrl' in card, false, `${id}: PNG-less expert carries NO avatarUrl field`)
+    assert.equal('avatarPath' in card, false, `${id}: no avatarPath key either (client emoji fallback is #8)`)
+  }
 }
 
 // config: expectedRevision — fresh passes, stale conflicts transparently.
@@ -1499,6 +1581,106 @@ assert.deepEqual(third.warnings, [], 'trailing-slash source spelling is the same
   assert.equal(server2.routes.size, 0)
   offSettings2()
   rmSync(roster2.dir, { recursive: true, force: true })
+}
+
+// ── 5c. avatar traversal armor (ticket #7) over a dedicated escape fixture ───
+//
+// The scanner existence-checks a DECLARED plugin.json avatar with stat —
+// which normalizes `..` and follows symlinks — so the scan table itself can
+// legitimately carry an avatarPath resolving outside the source root. The
+// route's realpath-both-sides containment must 404 those however they are
+// spelled, while an innocent avatar in the very same tree still serves.
+{
+  const escapeRoot = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-avatar-'))
+  const outsidePath = join(tmpdir(), 'dsh-workbuddy-market-avatar-outside.png')
+  writeFileSync(outsidePath, Buffer.from('89504e470d0a1a0a-outside-png'))
+  const escapeWrite = (relativePath, content) => {
+    const path = join(escapeRoot, relativePath)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, content)
+  }
+
+  // Innocent plugin: a plain avatars/ PNG inside the root.
+  escapeWrite('honest/agents/honest.md', '---\nname: honest\ndescription: innocent probe\n---\n\n正文。\n')
+  escapeWrite('honest/avatars/honest.png', Buffer.from('89504e470d0a1a0a-honest-png'))
+  escapeWrite('honest/.codebuddy-plugin/plugin.json', JSON.stringify({ name: 'honest' }))
+
+  // `..` escape: the declared avatar is a relative path walking out of the
+  // root to a REAL file (so the scanner's existence check accepts it).
+  escapeWrite('dotdot/agents/dotdot.md', '---\nname: dotdot\ndescription: escape probe one\n---\n\n正文。\n')
+  escapeWrite('dotdot/.codebuddy-plugin/plugin.json', JSON.stringify({
+    name: 'dotdot',
+    avatar: relative(join(escapeRoot, 'dotdot'), outsidePath),
+  }))
+
+  // Symlink escape: same outside file, reached through a link inside the
+  // plugin (stat follows links, so the scanner accepts this one too).
+  const escapees = ['dotdot']
+  if (process.platform !== 'win32') {
+    escapeWrite('linker/agents/linker.md', '---\nname: linker\ndescription: escape probe two\n---\n\n正文。\n')
+    mkdirSync(join(escapeRoot, 'linker', 'avatars'), { recursive: true })
+    symlinkSync(outsidePath, join(escapeRoot, 'linker', 'avatars', 'link.png'))
+    escapeWrite('linker/.codebuddy-plugin/plugin.json', JSON.stringify({ name: 'linker', avatar: 'avatars/link.png' }))
+    escapees.push('linker')
+  }
+
+  // Scenario anchors — the escapes are REAL: both cards carry an avatarPath
+  // whose realpath sits outside the (realpath'd) source root, so the guard
+  // below is exercised against an actual traversal, not a vacuous miss.
+  const escapeScan = await scanWorkbuddyRoot(escapeRoot)
+  const realEscapeRoot = realpathSync(escapeRoot)
+  const realOutside = realpathSync(outsidePath)
+  assert.ok(relative(realEscapeRoot, realOutside).startsWith('..'),
+    'scenario anchor: the outside file truly lies outside the source root')
+  for (const id of escapees) {
+    const card = escapeScan.experts.find((expert) => expert.id === id)
+    assert.ok(card !== undefined && typeof card.avatarPath === 'string', `${id}: the scan emitted a card with a declared avatar`)
+    assert.equal(realpathSync(card.avatarPath), realOutside,
+      `${id}: the declared avatar really resolves to the outside file (traversal is live)`)
+  }
+
+  const server3 = makeFakeServer()
+  const settings3 = makeFakeSettings()
+  const catalog3 = createCatalog()
+  const offSettings3 = mountWorkbuddySettings(settings3, fakeZ, catalog3)
+  await settings3.update(SETTINGS_NS, { sourcePath: escapeRoot })
+  const offRoutes3 = mountWorkbuddyMarketRoutes({ webServer: server3, settings: settings3 }, { catalog: catalog3 })
+  const avatarRoute3 = server3.routes.get('exact /dsh-workbuddy-market/api/avatar')
+  const stateRoute3 = server3.routes.get('exact /dsh-workbuddy-market/api/state')
+
+  const hit = await handle(avatarRoute3, makeRequest({ url: '/dsh-workbuddy-market/api/avatar?id=honest' }))
+  assert.equal(hit.response.status, 200, 'the innocent avatar in the same tree is a hit')
+  assert.ok(hit.response.buffer.equals(readFileSync(join(escapeRoot, 'honest', 'avatars', 'honest.png'))),
+    '…and serves byte-identical bytes')
+
+  for (const id of escapees) {
+    const miss = await handle(avatarRoute3, makeRequest({ url: `/dsh-workbuddy-market/api/avatar?id=${id}` }))
+    assert.equal(miss.response.status, 404, `${id}: an avatar resolving outside the root 404s`)
+    assert.deepEqual(miss.payload, { error: 'not found' }, `${id}: same uniform body as every other miss`)
+  }
+
+  // A read failing AFTER containment (unix, non-root: an unreadable file)
+  // answers the same uniform 404 — never a 500 leaking filesystem detail.
+  if (process.platform !== 'win32' && (typeof process.getuid === 'function' ? process.getuid() !== 0 : true)) {
+    const lockedPath = join(escapeRoot, 'honest', 'avatars', 'honest.png')
+    chmodSync(lockedPath, 0o000)
+    const denied = await handle(avatarRoute3, makeRequest({ url: '/dsh-workbuddy-market/api/avatar?id=honest' }))
+    assert.equal(denied.response.status, 404, 'a post-containment read failure 404s (no 500)')
+    assert.deepEqual(denied.payload, { error: 'not found' }, '…with the same no-detail body')
+    chmodSync(lockedPath, 0o644)
+  }
+
+  // State still offers avatarUrl for the escapees — the ROUTE is the guard
+  // (#13's client onError → emoji fallback, ticket #8, covers the display).
+  const escapeState = await handle(stateRoute3, makeRequest({ url: '/dsh-workbuddy-market/api/state' }))
+  assert.equal(escapeState.payload.experts.find((expert) => expert.id === 'dotdot').avatarUrl,
+    '/dsh-workbuddy-market/api/avatar?id=dotdot',
+    'state shape is untouched by the escape (the route answers 404 for it)')
+
+  offRoutes3()
+  offSettings3()
+  rmSync(escapeRoot, { recursive: true, force: true })
+  rmSync(outsidePath, { force: true })
 }
 
 // 5b-9 · gate both anchors against the SHIPPED compositions when a real

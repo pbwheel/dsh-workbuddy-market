@@ -8,8 +8,9 @@
  *                       as the raw `~`-prefixed string) + the watcher that
  *                       invalidates the scan cache;
  *   inject webServer + agentPresets + settings:
- *     src/routes.js     /dsh-workbuddy-market/api/{state,config,refresh,
- *                       install} over src/scanner.js via src/catalog.js, with
+ *     src/routes.js     /dsh-workbuddy-market/api/{state,avatar,config,
+ *                       refresh,install} over src/scanner.js via
+ *                       src/catalog.js, with
  *                       src/presets.js behind the install route — the
  *                       update/uninstall routes of later tickets join this
  *                       same segment and its single-flight lane;

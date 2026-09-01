@@ -42,7 +42,11 @@ export function buildSourcePathSchema(z) {
 
 /**
  * The namespace's descriptor from `settings.describe()` — the one place
- * that knows how to find this plugin's entry in the service's list.
+ * that knows how to find this plugin's entry in the service's list. (The
+ * summon segment's tolerant `currentRawSourcePath` in src/summon.js
+ * deliberately bypasses this descriptor: it reads `settings.get` and falls
+ * back to the default path, because it must stay usable while the settings
+ * segment is pending, design §1.)
  * @param {object} settingsService - host settings service (injected `settings`)
  * @returns {{ ns: string, value: { sourcePath: string }, revision: number }} the descriptor
  * @throws when the namespace is not registered (the settings segment failed)

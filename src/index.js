@@ -16,11 +16,16 @@
  *                       single-flight lane;
  *   inject tools + subagents + systemPrompt + agentPresets:
  *     src/summon.js     workbuddy_experts / summon_workbuddy_expert — the
- *                       P3 summon segment, deliberately absent until that
- *                       ticket (T1 ships only real, working segments).
+ *                       mid-session summon segment (ticket #10): list
+ *                       installed experts, or run one as a spawn-provider
+ *                       one-shot subagent with the scan card's full
+ *                       persona and the two-market deny list. No settings
+ *                       dependency: this segment stays usable while the
+ *                       settings/routes segments are pending (design §1).
  *
- * `settings` is a hard dependency of both mounted segments: a composition
- * without it leaves them pending (diagnosable), never half-activated.
+ * `settings` is a hard dependency of the settings and routes segments: a
+ * composition without it leaves them pending (diagnosable), never
+ * half-activated — while the summon segment runs without it.
  *
  * The schemastery factory resolves at module load (top-level await): the
  * settings schema needs it, and a link-installed copy cannot resolve the
@@ -32,6 +37,7 @@
 import { createCatalog } from './catalog.js'
 import { mountWorkbuddyMarketRoutes } from './routes.js'
 import { mountWorkbuddySettings } from './settings.js'
+import { mountWorkbuddySummon } from './summon.js'
 import { resolveSchemastery } from './schemastery.js'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -57,5 +63,15 @@ export function apply(ctx) {
 
   ctx.inject(['webServer', 'agentPresets', 'settings'], (hostCtx) => {
     ctx.effect(() => mountWorkbuddyMarketRoutes(hostCtx, { catalog }), 'dsh-workbuddy-market:routes')
+  })
+
+  // Separate inject list on purpose (sister-plugin pattern): summoning
+  // needs the tool/subagent/prompt seams and the roster but NOT the web
+  // server or the settings service — the market page needs the web server
+  // but not the seams — so neither half holds the other hostage to a
+  // missing service. The shared catalog keeps the summon side on the same
+  // fingerprint cache as the routes (never a private rescan).
+  ctx.inject(['tools', 'subagents', 'systemPrompt', 'agentPresets'], (summonCtx) => {
+    ctx.effect(() => mountWorkbuddySummon(summonCtx, { catalog }), 'dsh-workbuddy-market:summon')
   })
 }

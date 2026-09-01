@@ -22,16 +22,25 @@
  *      id first-wins + warning, broken-directory degradation, verbatim
  *      skills copying, undefined avatarPath for PNG-less experts, and the
  *      body-H1 zhName extension);
- *   3. catalog cache: cached per source path, invalidated explicitly;
+ *   3. catalog cache + fingerprint (ticket #4): the stat-only fingerprint's
+ *      stability and disclosed blind spots (a size+mtime-preserving rewrite
+ *      stays invisible — refresh's raison d'être; git: copies cannot move
+ *      the key), a cache hit that re-reads zero file content, auto-rescan
+ *      on an edited agent file / a NEW agent file inside an existing
+ *      plugin directory (the top-level-mtime regression anchor, decision
+ *      #5) / an edited plugin.json (#12), invalidate() forcing a rescan of
+ *      an unchanged tree, and concurrent misses sharing one in-flight scan;
  *   4. settings mount against a fake settings service + fake schemastery:
- *      base default, raw-string storage, watcher invalidates the catalog;
+ *      base default, raw-string storage, and the watcher dropping the
+ *      cache the moment sourcePath changes (new path serves its own scan,
+ *      switching back rescans, a same-value update keeps the cache);
  *   5. routes over a fake webServer with duck-typed request/response:
  *      /api/state shape + no-store (including a full state over the
- *      pathology fixture), /api/config (save, tilde passthrough,
- *      nonexistent path allowed, revision conflict 409, validation),
- *      /api/refresh, 405/403 rejection, the 4 KiB body cap, the mutating
- *      single-flight lane (concurrent second change → 409), and full
- *      disposal;
+ *      pathology fixture and a route-level auto-rescan after a fixture
+ *      edit), /api/config (save, tilde passthrough, nonexistent path
+ *      allowed, revision conflict 409, validation), /api/refresh, 405/403
+ *      rejection, the 4 KiB body cap, the mutating single-flight lane
+ *      (concurrent second change → 409), and full disposal;
  *   6. client bundle loads through a stub __ModuleLoader__ and mounts
  *      nothing (the market page is a later ticket);
  *   7. the schemastery resolver, when a real harness is present on this
@@ -43,7 +52,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { readFile } from 'node:fs/promises'
@@ -433,23 +442,199 @@ for (const expert of scan.experts) {
   }
 }
 
-// ── 3. catalog cache ─────────────────────────────────────────────────────────
+// ── 3. catalog cache + fingerprint (ticket #4) ──────────────────────────────
 
-const { createCatalog } = await import(join(root, 'src', 'catalog.js'))
+const { createCatalog, computeSourceFingerprint } = await import(join(root, 'src', 'catalog.js'))
 
-const scanCalls = []
-const catalog = createCatalog(async (rawPath) => {
-  scanCalls.push(rawPath)
-  return { experts: [], warnings: [] }
-})
-assert.deepEqual(await catalog.stateOf('~/one'), { experts: [], warnings: [] })
-await catalog.stateOf('~/one')
-assert.equal(scanCalls.length, 1, 'same path served from cache')
-await catalog.stateOf('~/two')
-assert.equal(scanCalls.length, 2, 'different path rescans')
-catalog.invalidate()
-await catalog.stateOf('~/two')
-assert.equal(scanCalls.length, 3, 'invalidate forces a rescan')
+const cacheRoot = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-cache-'))
+
+/** Write into the cache fixture, creating parent directories as needed. */
+function cacheWrite(relative, content) {
+  const path = join(cacheRoot, relative)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, content)
+}
+
+/** Push one file's mtime deterministically ahead (same-ms writes must not mask a change). */
+function bumpMtime(path) {
+  const at = new Date(Date.now() + 5000)
+  utimesSync(path, at, at)
+}
+
+cacheWrite('plug-one/agents/cache-one.md', '---\nname: cache-one\ndescription: v1 trigger text\n---\n\nv1 正文。\n')
+cacheWrite('plug-one/rules/r1.md', '规则一。\n')
+cacheWrite('plug-one/skills/skill-a/SKILL.md', 'SKILL: a\n')
+cacheWrite('plug-one/avatars/a.png', FIXTURE_PNG)
+cacheWrite('plug-one/.codebuddy-plugin/plugin.json', JSON.stringify({
+  name: 'plug-one',
+  displayDescription: { zh: '插件描述 v1' },
+}))
+
+// 3a. The fingerprint itself: stable, stat-shaped, and blind exactly where
+// the design discloses blindness.
+{
+  // Pin the agent file's mtime to a clean whole-second value first: a Date
+  // carries only milliseconds, so restoring an unpinned nanosecond mtime
+  // via utimes would itself move mtimeMs and muddy the blind-spot probe.
+  const pinned = new Date(Math.floor(Date.now() / 1000) * 1000 + 60_000)
+  const agentPath = join(cacheRoot, 'plug-one', 'agents', 'cache-one.md')
+  utimesSync(agentPath, pinned, pinned)
+  const fingerprint = await computeSourceFingerprint(cacheRoot)
+  assert.equal(await computeSourceFingerprint(cacheRoot), fingerprint,
+    'the fingerprint is stable across repeated computations')
+
+  // Same size + restored mtime → same fingerprint. The key is stat tuples,
+  // not content hashes (decision #5) — refresh exists precisely for this.
+  const original = readFileSync(agentPath, 'utf8')
+  writeFileSync(agentPath, original.replaceAll('v1', 'vX')) // same byte length
+  utimesSync(agentPath, pinned, pinned) // the identical Date → identical stored mtime
+  assert.equal(await computeSourceFingerprint(cacheRoot), fingerprint,
+    'a size+mtime-preserving rewrite stays invisible (the disclosed exotic blind spot)')
+  writeFileSync(agentPath, original)
+
+  // git: duplicate copies cannot move the key — the scanner skips them, so
+  // the key must skip them too (⟺ with the scan output).
+  const withoutGit = await computeSourceFingerprint(cacheRoot)
+  for (const rel of [
+    'agents/cache-one.md', 'rules/r1.md', 'skills/skill-a/SKILL.md',
+    'avatars/a.png', '.codebuddy-plugin/plugin.json',
+  ]) {
+    cacheWrite(`git:plug-one:copy/${rel}`, readFileSync(join(cacheRoot, 'plug-one', rel)))
+  }
+  assert.equal(await computeSourceFingerprint(cacheRoot), withoutGit,
+    'git: copies cannot move the fingerprint')
+
+  // Visibility-pinning probes (the ⟺ contract, decision #20): a root-level
+  // DOT plugin directory IS scanned (only git: is filtered at the root) →
+  // it must move the key; dot entries INSIDE the named subdirectories are
+  // invisible to the scanner's listDir → they must not.
+  mkdirSync(join(cacheRoot, '.dot-plug', 'agents'), { recursive: true })
+  mkdirSync(join(cacheRoot, '.dot-plug', '.codebuddy-plugin'), { recursive: true })
+  writeFileSync(join(cacheRoot, '.dot-plug', 'agents', 'dot.md'),
+    '---\nname: dot-one\ndescription: x\n---\n\n正文。\n')
+  writeFileSync(join(cacheRoot, '.dot-plug', '.codebuddy-plugin', 'plugin.json'), '{"name":"dot-plug"}')
+  assert.notEqual(await computeSourceFingerprint(cacheRoot), withoutGit,
+    'a root-level dot plugin directory moves the fingerprint (the scanner scans it)')
+  assert.ok((await scanWorkbuddyRoot(cacheRoot)).experts.some((expert) => expert.id === 'dot-one'),
+    'scenario anchor: the scanner really does emit the dot plugin card')
+  const withDot = await computeSourceFingerprint(cacheRoot)
+  writeFileSync(join(cacheRoot, 'plug-one', 'agents', '.DS_Store'), 'finder junk')
+  assert.equal(await computeSourceFingerprint(cacheRoot), withDot,
+    'dot entries inside the named subdirectories never move the fingerprint')
+  rmSync(join(cacheRoot, '.dot-plug'), { recursive: true, force: true })
+  rmSync(join(cacheRoot, 'git:plug-one:copy'), { recursive: true, force: true })
+}
+
+// 3b. The catalog: counting seams make the no-reread claim measurable — the
+// scan function is the ONLY content reader, so "scan not invoked" is
+// "no file content re-read".
+let cacheScans = 0
+let cacheFingerprints = 0
+const cacheCatalog = createCatalog(
+  async (rawPath) => { cacheScans += 1; return scanWorkbuddyRoot(rawPath) },
+  async (rawPath) => { cacheFingerprints += 1; return computeSourceFingerprint(rawPath) },
+)
+const cardOf = (state, id) => state.experts.find((expert) => expert.id === id)
+
+const firstState = await cacheCatalog.stateOf(cacheRoot)
+assert.equal(cacheScans, 1, 'the first request scans')
+assert.ok(cardOf(firstState, 'cache-one') !== undefined, 'the fixture card survives the first scan')
+
+const secondState = await cacheCatalog.stateOf(cacheRoot)
+assert.equal(cacheScans, 1, 'unchanged fingerprint → the cached scan serves the request, zero content re-reads')
+assert.equal(cacheFingerprints, 2, 'the stat-only fingerprint IS recomputed on every request')
+assert.equal(secondState, firstState, 'a cache hit returns the identical result object')
+
+// Editing an existing agent file — the primary "WorkBuddy side updates" form.
+cacheWrite('plug-one/agents/cache-one.md', '---\nname: cache-one\ndescription: v2 trigger text, longer\n---\n\nv2 正文更长。\n')
+bumpMtime(join(cacheRoot, 'plug-one', 'agents', 'cache-one.md'))
+const editedState = await cacheCatalog.stateOf(cacheRoot)
+assert.equal(cacheScans, 2, 'editing an existing agent file auto-rescans (decision #5)')
+assert.equal(cardOf(editedState, 'cache-one').description, 'v2 trigger text, longer',
+  'state reflects the edited value without any refresh call')
+
+// A NEW agent file inside an existing plugin directory — the regression
+// anchor that kills top-level-mtime schemes: neither the plugin directory's
+// nor the root's mtime moves, yet the new card must appear.
+{
+  const plugDirMtime = statSync(join(cacheRoot, 'plug-one')).mtimeMs
+  const rootMtime = statSync(cacheRoot).mtimeMs
+  cacheWrite('plug-one/agents/cache-two.md', '---\nname: cache-two\ndescription: second card\n---\n\n正文。\n')
+  assert.equal(statSync(join(cacheRoot, 'plug-one')).mtimeMs, plugDirMtime,
+    'scenario anchor: the plugin directory mtime did NOT move (top-level schemes miss exactly this)')
+  assert.equal(statSync(cacheRoot).mtimeMs, rootMtime,
+    'scenario anchor: the root mtime did NOT move either')
+  const grownState = await cacheCatalog.stateOf(cacheRoot)
+  assert.equal(cacheScans, 3, 'a new agent file in an existing plugin auto-rescans')
+  assert.ok(cardOf(grownState, 'cache-two') !== undefined, 'the new card is visible with no manual refresh')
+}
+
+// Editing plugin.json — the #12 metadata source must invalidate the cache.
+cacheWrite('plug-one/.codebuddy-plugin/plugin.json',
+  JSON.stringify({ name: 'plug-one', displayDescription: { zh: '插件描述 v2' } }))
+const manifestState = await cacheCatalog.stateOf(cacheRoot)
+assert.equal(cacheScans, 4, 'a plugin.json edit invalidates the cache (#12)')
+assert.equal(cardOf(manifestState, 'cache-one').zhDescription, '插件描述 v2',
+  'the metadata change is visible without a refresh')
+
+// Quiet again → cache hit; invalidate() (the refresh seam) forces one scan.
+await cacheCatalog.stateOf(cacheRoot)
+assert.equal(cacheScans, 4, 'no further change → cache hit again')
+cacheCatalog.invalidate()
+await cacheCatalog.stateOf(cacheRoot)
+assert.equal(cacheScans, 5, 'invalidate() forces a rescan of an unchanged tree')
+
+// Concurrent misses over one (path, fingerprint) share a single in-flight scan.
+{
+  cacheWrite('plug-one/agents/cache-three.md', '---\nname: cache-three\ndescription: third card\n---\n\n正文。\n')
+  let releaseScan
+  const scanGate = new Promise((resolve) => { releaseScan = resolve })
+  const gatedCatalog = createCatalog(async (rawPath) => {
+    cacheScans += 1
+    await scanGate
+    return scanWorkbuddyRoot(rawPath)
+  })
+  const shared = Promise.all([gatedCatalog.stateOf(cacheRoot), gatedCatalog.stateOf(cacheRoot)])
+  releaseScan()
+  const [sharedOne, sharedTwo] = await shared
+  assert.equal(cacheScans, 6, 'two concurrent misses coalesce into ONE scan')
+  assert.equal(sharedOne, sharedTwo, 'both callers receive the same result object')
+  assert.ok(cardOf(sharedOne, 'cache-three') !== undefined, 'the coalesced scan is the post-change one')
+}
+
+// invalidate() racing an in-flight scan (the refresh route's exotic-case
+// guarantee): a refresh arriving mid-scan must start its OWN scan — never
+// join the pre-refresh one — and the late first scan must not repopulate
+// the cache when it settles. Without the epoch gate the refresh would be
+// served the pre-invalidation result in exactly the size+mtime-preserving
+// case refresh exists for.
+{
+  let releaseFirst
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve })
+  let firstStarted = false
+  const born = cacheScans
+  const racingCatalog = createCatalog(async (rawPath) => {
+    cacheScans += 1
+    if (!firstStarted) {
+      firstStarted = true
+      await firstGate
+    }
+    return scanWorkbuddyRoot(rawPath)
+  })
+  const firstPromise = racingCatalog.stateOf(cacheRoot)
+  while (!firstStarted) await new Promise((resolve) => setImmediate(resolve))
+  racingCatalog.invalidate() // "refresh" lands while scan #1 is in flight
+  const refreshPromise = racingCatalog.stateOf(cacheRoot)
+  releaseFirst()
+  const [firstResult, refreshResult] = await Promise.all([firstPromise, refreshPromise])
+  assert.equal(cacheScans, born + 2, 'invalidate during an in-flight scan forces a NEW scan, no joining')
+  assert.notEqual(refreshResult, firstResult, 'the refresh answer is its own scan, not the in-flight one')
+  const settled = await racingCatalog.stateOf(cacheRoot)
+  assert.equal(settled, refreshResult, 'the late pre-invalidate scan never repopulated the cache')
+  assert.equal(cacheScans, born + 2, 'the follow-up request serves the post-invalidate cache entry')
+}
+
+rmSync(cacheRoot, { recursive: true, force: true })
 
 // ── 4. settings mount over fakes ─────────────────────────────────────────────
 
@@ -556,16 +741,57 @@ assert.equal(typeof schema, 'function', 'schema is callable')
 assert.equal(typeof schema.toJSON, 'function', 'schema exposes toJSON')
 assert.equal(schema({ sourcePath: 'x' }).sourcePath, 'x')
 
-// Watcher wiring: a sourcePath change invalidates the catalog.
-let watchScans = 0
-const watchCatalog = createCatalog(async () => { watchScans += 1; return { experts: [], warnings: [] } })
-const offWatchSettings = mountWorkbuddySettings(makeFakeSettings(), fakeZ, watchCatalog)
-await watchCatalog.stateOf('~/a')
-await watchCatalog.stateOf('~/a')
-assert.equal(watchScans, 1)
-await fakeSettings.update(SETTINGS_NS, { sourcePath: '~/kept-raw' }) // same value: no watcher trip
-assert.equal(watchScans, 1, 'deep-equal value change does not rescan')
-offWatchSettings()
+// Watcher wiring over REAL fixture trees: a sourcePath change drops the
+// cache the moment settings reports it — the new path serves its own fresh
+// scan, switching back rescans (the single cache entry was dropped), and a
+// same-value update keeps the cache (the watcher's own path guard).
+{
+  const switchRootA = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-watch-a-'))
+  const switchRootB = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-watch-b-'))
+  for (const [base, plugin, agent] of [
+    [switchRootA, 'plug-a', 'sw-a'],
+    [switchRootB, 'plug-b', 'sw-b'],
+  ]) {
+    mkdirSync(join(base, plugin, 'agents'), { recursive: true })
+    writeFileSync(join(base, plugin, 'agents', `${agent}.md`),
+      `---\nname: ${agent}\ndescription: switch probe\n---\n\n正文。\n`)
+    mkdirSync(join(base, plugin, '.codebuddy-plugin'), { recursive: true })
+    writeFileSync(join(base, plugin, '.codebuddy-plugin', 'plugin.json'), JSON.stringify({ name: plugin }))
+  }
+  let switchScans = 0
+  const switchCatalog = createCatalog(async (rawPath) => {
+    switchScans += 1
+    return scanWorkbuddyRoot(rawPath)
+  })
+  const switchSettings = makeFakeSettings()
+  const offSwitch = mountWorkbuddySettings(switchSettings, fakeZ, switchCatalog)
+
+  await switchSettings.update(SETTINGS_NS, { sourcePath: switchRootA })
+  assert.deepEqual((await switchCatalog.stateOf(switchRootA)).experts.map((expert) => expert.id), ['sw-a'],
+    'root A serves its own plugin card')
+  assert.equal(switchScans, 1, 'first request over root A scans')
+  await switchCatalog.stateOf(switchRootA)
+  assert.equal(switchScans, 1, 'unchanged A serves from cache')
+
+  await switchSettings.update(SETTINGS_NS, { sourcePath: switchRootB }) // watcher fires → invalidate
+  assert.deepEqual((await switchCatalog.stateOf(switchRootB)).experts.map((expert) => expert.id), ['sw-b'],
+    'the new path serves its own scan immediately — the cache dropped with the watch event')
+  assert.equal(switchScans, 2, 'the path switch forced a second scan')
+
+  // Same-value update: the fake service fires watchers unconditionally, so
+  // this genuinely exercises mountWorkbuddySettings's own path guard.
+  await switchSettings.update(SETTINGS_NS, { sourcePath: switchRootB })
+  await switchCatalog.stateOf(switchRootB)
+  assert.equal(switchScans, 2, 'a same-value update does not drop the cache')
+
+  await switchSettings.update(SETTINGS_NS, { sourcePath: switchRootA })
+  assert.deepEqual((await switchCatalog.stateOf(switchRootA)).experts.map((expert) => expert.id), ['sw-a'],
+    'switching back rescans — the watcher dropped the single cache entry')
+  assert.equal(switchScans, 3, 'switching back to A scanned a third time')
+  offSwitch()
+  rmSync(switchRootA, { recursive: true, force: true })
+  rmSync(switchRootB, { recursive: true, force: true })
+}
 offSettings()
 
 // ── 5. routes over a fake webServer ─────────────────────────────────────────
@@ -720,6 +946,19 @@ const fixtureDir = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-smoke-'))
     'card fields survive the route hop')
   assert.ok(payload.warnings.some((warning) => warning.includes('duplicate expert id "dup-expert"')),
     'scan warnings surface in the state payload')
+}
+
+// Route-level auto-rescan anchor: mutate the fixture AFTER the state above —
+// the next GET must serve a fresh scan with no refresh call. The file lands
+// in solo-one's agents/ directory, so no top-level mtime moves (decision #5).
+{
+  writeFileSync(join(fixtureRoot, 'solo-one', 'agents', 'route-added.md'),
+    '---\nname: route-added\ndescription: route-level anchor\n---\n\n正文。\n')
+  const scansBefore = routeScanCalls.length
+  const { payload } = await handle(stateRoute, makeRequest({ url: '/dsh-workbuddy-market/api/state' }))
+  assert.equal(routeScanCalls.length, scansBefore + 1, 'a fixture edit forces the next /api/state to rescan')
+  assert.ok(payload.experts.some((expert) => expert.id === 'route-added'),
+    'the new card surfaces through the route without any refresh call')
 }
 
 // config: expectedRevision — fresh passes, stale conflicts transparently.

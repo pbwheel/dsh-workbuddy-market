@@ -1,0 +1,6 @@
+# dsh bundle patch: inserts this plugin into a profile's layer stack.
+# Listed in a profile's package.json dsh.profile.bundles, this patch adds the
+# host half; the client half is discovered separately via dsh.client.
+- insert:
+    - id: dsh-workbuddy-market
+      name: 'dsh-workbuddy-market'

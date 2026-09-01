@@ -81,7 +81,7 @@ client/client.js                       src/index.js（host 入口，三段 injec
 
 用宿主 `settings` 服务的插件命名空间机制（已核实契约：`register(ns, schema, { base })` → `{ get, watch, update, replace }`，fiber 卸载自动清理，revision 冲突保护）：
 
-- ns：`dsh-workbuddy-market`；schema（schemastery）：`{ sourcePath: string }`；
+- ns：`workbuddy-market`（settings 命名空间强制 `^[a-z][a-z0-9-]*$`，插件名的点号不合法——T1 实施时修正）；schema（schemastery）：`{ sourcePath: string }`；
 - `base` = 默认路径 `~/.workbuddy/plugins/marketplaces/experts/plugins`（用户没改过就一直用它）；**`~` 按原串存储与回显、使用时展开（#18）**——scanner 与 avatar 路由拿到路径先做 tilde 展开，settings 与 `/api/state` 里始终是用户输入的原串；
 - 改路径：client `POST /api/config { sourcePath }` → host 侧 **service 级** `settings.update(ns, { sourcePath }, expectedRevision)`（scope 级 `update(patch)` 不接收 `expectedRevision`，冲突保护只能走 service 级）→ watch 触发缓存失效 → 返回新 state；
 - **允许保存不存在的路径**（便于先填后建），`/api/state` 返回 `pathExists` + warning，页面黄条提示——避免「手滑打错一个字母就被拒」和「目录暂时没挂载」的死锁；
@@ -165,6 +165,7 @@ dsh-workbuddy-market/
   cordis.patch.yml        # host 半边插进 profile 层栈
   src/index.js            # 三段 inject 编排（settings / webServer+agentPresets / tools+subagents）
   src/settings.js  src/scanner.js  src/catalog.js  src/presets.js  src/routes.js  src/summon.js
+  src/schemastery.js      # link 安装下 @deepseek-ai/schemastery 的运行时锚定解析（T1 新增）
   client/client.js
   scripts/smoke.mjs       # 离线冒烟（自建 fixture 假 WorkBuddy 树，见 §9）
   LICENSE  README.md

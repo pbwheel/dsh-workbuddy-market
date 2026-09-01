@@ -1,0 +1,51 @@
+{
+  "name": "dsh-workbuddy-market",
+  "version": "0.1.0",
+  "description": "WorkBuddy expert market inside DeepSeek Harness — scan your local WorkBuddy plugin directory at runtime, browse expert cards, install one as a user agent preset. · DSH WorkBuddy 专家市场：扫本地目录，逛卡片，装专家。",
+  "type": "module",
+  "main": "src/index.js",
+  "license": "MIT",
+  "author": "pbwheel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pbwheel/dsh-workbuddy-market.git"
+  },
+  "homepage": "https://github.com/pbwheel/dsh-workbuddy-market#readme",
+  "bugs": {
+    "url": "https://github.com/pbwheel/dsh-workbuddy-market/issues"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "client",
+    "scripts",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "cordis",
+    "agent-preset",
+    "market",
+    "experts",
+    "workbuddy"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  }
+}

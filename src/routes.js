@@ -1,7 +1,8 @@
 /**
  * HTTP routes bridging the (future) browser market page to the host. T1
  * shipped the three skeleton routes; T4 (ticket #5) added the install route;
- * T6 (ticket #7) adds the avatar stream:
+ * T6 (ticket #7) adds the avatar stream; T5 (ticket #6) adds the
+ * update/uninstall routes and the install overlay on state:
  *
  *   GET  /dsh-workbuddy-market/api/state  → { sourcePath, pathExists,
  *                                             revision, experts, orphans,
@@ -9,7 +10,17 @@
  *                                             cards carry avatarUrl (only
  *                                             when the scan found a PNG —
  *                                             PNG-less experts have neither
- *                                             avatarUrl nor avatarPath);
+ *                                             avatarUrl nor avatarPath) and
+ *                                             the install flags from the
+ *                                             roster/manifest overlay
+ *                                             (installed/updatable/broken,
+ *                                             every card, all three always
+ *                                             present); `orphans` lists the
+ *                                             roster wb-* presets whose
+ *                                             manifest names another source
+ *                                             or whose id left the current
+ *                                             scan table — reported, never
+ *                                             auto-uninstalled (#9);
  *   GET  /dsh-workbuddy-market/api/avatar?id=<id>
  *                                     → the expert's PNG read on demand from
  *                                       the CURRENT scan table (never copied),
@@ -34,18 +45,30 @@
  *                                     → install the scanned expert as the
  *                                       user preset wb-<id> through the
  *                                       roster (src/presets.js, the design
- *                                       §4 seven steps).
+ *                                       §4 seven steps);
+ *   POST /dsh-workbuddy-market/api/update { id }
+ *                                     → re-stamp the installed preset in
+ *                                       place from the CURRENT scan card
+ *                                       (preset.yml + persona + skills sync
+ *                                       including deletions + manifest +
+ *                                       standing re-validation);
+ *   POST /dsh-workbuddy-market/api/uninstall { id }
+ *                                     → remove the whole wb-<id> preset
+ *                                       directory through the roster
+ *                                       (skills and manifest with it),
+ *                                       refusing non-user-trust entries;
+ *                                       works for orphans too — the roster,
+ *                                       not the scan table, is the authority.
  *
  * Security baseline (ported from the sister plugin's verified routes):
  * mutating routes accept same-origin POSTs only (405/403 otherwise), JSON
  * bodies are capped at 4 KiB, every JSON response carries no-store, and one
  * mutating operation runs at a time — a concurrent second change gets 409.
  * The single-flight lane is shared by every mutating route of this plugin
- * (roster copies are not concurrency-safe); the update/uninstall routes of
- * later tickets join the same lane. Installs are file copies plus text
- * edits — no script ever runs. The avatar route is a GET read: no origin
- * check, no lane — its only guard is the id/containment chain above, and it
- * is the ONE response allowed to cache (max-age=60, the design's sole
+ * (roster copies are not concurrency-safe). Installs/updates are file copies
+ * plus text edits — no script ever runs. The avatar route is a GET read: no
+ * origin check, no lane — its only guard is the id/containment chain above,
+ * and it is the ONE response allowed to cache (max-age=60, the design's sole
  * exception to no-store; a source PNG mtime change moves the fingerprint,
  * the rescan swaps the bytes, and the 60s window absorbs itself).
  */
@@ -53,7 +76,7 @@
 import { readFile, realpath, stat } from 'node:fs/promises'
 import { isAbsolute, relative, sep } from 'node:path'
 
-import { installWorkbuddyExpert } from './presets.js'
+import { installWorkbuddyExpert, installedMarketState, uninstallWorkbuddyExpert, updateWorkbuddyExpert } from './presets.js'
 import { ID_RE, expandTildePath } from './scanner.js'
 import { SETTINGS_NS, namespaceDescriptor } from './settings.js'
 import { errorMessage } from './util.js'
@@ -121,40 +144,52 @@ function isWithinRoot(rootReal, candidateReal) {
  * `avatarPath`, plus `avatarUrl` — but ONLY for experts the scan gave a PNG.
  * PNG-less experts carry neither field (the client's emoji fallback is the
  * next ticket). Ids are ID_RE-constrained by the scanner, so the URL needs
- * no percent-encoding.
+ * no percent-encoding. `flags` (the install overlay's verdict for this id,
+ * undefined when nothing is installed) contributes the three install
+ * booleans — present on EVERY card so the market page reads one shape.
+ * @param {object} expert - the scan card
+ * @param {{ installed?: boolean, updatable?: boolean, broken?: boolean }} [flags]
  */
-function stateCardOf(expert) {
+function stateCardOf(expert, flags) {
   const { avatarPath, ...card } = expert
-  return avatarPath === undefined
+  const base = avatarPath === undefined
     ? card
     : { ...card, avatarUrl: `${ROUTE_BASE}/api/avatar?id=${expert.id}` }
+  const { installed = false, updatable = false, broken = false } = flags ?? {}
+  return { ...base, installed, updatable, broken }
 }
 
 /**
  * Compose one `/api/state` payload: raw stored path (tilde intact, #18),
  * its existence flag, the settings revision for conflict protection, the
  * expert table (cards via `stateCardOf` — avatarUrl only where the scan
- * found a PNG), and warnings.
- * @param {object} deps - { settingsService, catalog }
+ * found a PNG, plus the install overlay's installed/updatable/broken), the
+ * orphan presets (installed from another source or gone from this source,
+ * #9 — reported, never auto-uninstalled), and warnings (scan + path +
+ * install-overlay together).
+ * @param {object} deps - { settingsService, catalog, agentPresets }
  * @returns {Promise<object>} the state payload
  */
-async function buildState({ settingsService, catalog }) {
+async function buildState({ settingsService, catalog, agentPresets }) {
+  if (agentPresets === undefined) {
+    // Unreachable in production (the routes segment hard-injects the
+    // service) — a loud diagnostic beats a silent TypeError.
+    throw new Error('agentPresets service is not composed')
+  }
   const descriptor = namespaceDescriptor(settingsService)
   const rawSourcePath = descriptor.value.sourcePath
   const exists = await pathExists(rawSourcePath)
   const scan = await catalog.stateOf(rawSourcePath)
   const warnings = [...scan.warnings]
   if (!exists) warnings.push(`source path does not exist: ${rawSourcePath}`)
+  const overlay = await installedMarketState(agentPresets, rawSourcePath, scan.experts)
   return {
     sourcePath: rawSourcePath,
     pathExists: exists,
     revision: descriptor.revision,
-    experts: scan.experts.map(stateCardOf),
-    // Orphan detection (installed wb-* presets missing from the current
-    // source) reads the roster; it lands with the install ticket, and the
-    // field ships now so the state shape matches the API table from day one.
-    orphans: [],
-    warnings,
+    experts: scan.experts.map((expert) => stateCardOf(expert, overlay.byId.get(expert.id))),
+    orphans: overlay.orphans,
+    warnings: [...warnings, ...overlay.warnings],
   }
 }
 
@@ -184,7 +219,8 @@ function requireExpertId(body) {
 /**
  * Register every WorkBuddy-market route on the host webServer. Returns a
  * disposer that drops them all, so the plugin unloads cleanly.
- * @param {object} hostCtx - injected context exposing `webServer` + `settings`
+ * @param {object} hostCtx - injected context exposing `webServer` +
+ *                           `agentPresets` + `settings`
  * @param {{ invalidate(): void }} deps - { catalog } the shared scan cache
  */
 export function mountWorkbuddyMarketRoutes(hostCtx, { catalog }) {
@@ -194,23 +230,22 @@ export function mountWorkbuddyMarketRoutes(hostCtx, { catalog }) {
     if (typeof off === 'function') disposers.push(off)
   }
 
-  /** What buildState reads: the injected settings service plus the shared scan cache. */
-  const deps = { settingsService: hostCtx.settings, catalog }
+  /** What buildState reads: settings + the shared scan cache + the roster. */
+  const deps = { settingsService: hostCtx.settings, catalog, agentPresets: hostCtx.agentPresets }
 
   /** The RAW stored source path (tilde intact, #18) every scan-facing caller reads. */
   const rawSourcePathOf = () => currentSourcePath(hostCtx.settings)
 
   /**
    * The CURRENT scan table's card for one expert id (undefined when absent)
-   * — the shared lookup of the avatar and install routes; later tickets'
-   * update/uninstall routes join here.
+   * — the shared lookup of the avatar, install, and update routes.
    */
   const currentCardOf = async (id) => {
     const scan = await deps.catalog.stateOf(rawSourcePathOf())
     return scan.experts.find((expert) => expert.id === id)
   }
 
-  /** One mutating operation at a time; roster copies (later tickets) are not concurrency-safe. */
+  /** One mutating operation at a time; roster writes are not concurrency-safe. */
   let mutating = false
 
   /** Shared guard chain for mutating routes: method, origin, single-flight. */
@@ -375,6 +410,51 @@ export function mountWorkbuddyMarketRoutes(hostCtx, { catalog }) {
         const card = await currentCardOf(id)
         if (card === undefined) throw new Error(`unknown expert id: ${id}`)
         const result = await installWorkbuddyExpert(hostCtx.agentPresets, card, rawSourcePath)
+        sendJson(response, 200, { ok: true, ...result })
+      } catch (error) {
+        sendJson(response, 400, { error: errorMessage(error) })
+      } finally {
+        mutating = false
+      }
+    },
+  })
+
+  register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/api/update`,
+    handler: async (request, response) => {
+      if (!mutationGuard(request, response)) return
+      try {
+        const id = requireExpertId(await readJsonBody(request))
+        // Like install, the update re-stamps from the CURRENT scan card of
+        // the CURRENT source — presets.js owns the roster/manifest checks
+        // (not installed / non-user trust / #17 manifest / #9 foreign source).
+        const rawSourcePath = rawSourcePathOf()
+        const card = await currentCardOf(id)
+        if (card === undefined) throw new Error(`unknown expert id: ${id}`)
+        const result = await updateWorkbuddyExpert(hostCtx.agentPresets, card, rawSourcePath)
+        sendJson(response, 200, { ok: true, ...result })
+      } catch (error) {
+        sendJson(response, 400, { error: errorMessage(error) })
+      } finally {
+        mutating = false
+      }
+    },
+  })
+
+  register({
+    kind: 'exact',
+    path: `${ROUTE_BASE}/api/uninstall`,
+    handler: async (request, response) => {
+      if (!mutationGuard(request, response)) return
+      try {
+        const id = requireExpertId(await readJsonBody(request))
+        // ID_RE gate for shape (the scanner constrains every real expert id
+        // the same way); the roster — NOT the scan table — is the uninstall
+        // authority, so orphans (ids absent from the current source) go
+        // through: uninstalling them is the designed cleanup path (#9).
+        if (!ID_RE.test(id)) throw new Error(`unknown expert id: ${id}`)
+        const result = await uninstallWorkbuddyExpert(hostCtx.agentPresets, id)
         sendJson(response, 200, { ok: true, ...result })
       } catch (error) {
         sendJson(response, 400, { error: errorMessage(error) })

@@ -110,6 +110,19 @@
  *      zero-installs opens the settings section instead of the popover;
  *      a failed route still opens the popover with empty-state copy), and
  *      one disposer releasing both registrations with the style tag;
+ *   6d. the P4 interactions (ticket #12) over the same storing React stub
+ *      and scripted fetch: the team group view (groupCardsByPlugin/
+ *      groupExpanded/groupStatsOf derivations; a page where the team
+ *      renders as ONE collapsed-by-default group header with aggregated
+ *      marks while solo cards stay flat; click-to-expand; the auto-expand
+ *      under an active query and the explicit fold that overrides it; the
+ *      census/chips/matchline still counting expert cards), the serial
+ *      bulk update (strictly one /api/update at a time with a state
+ *      refetch after EVERY completion; the lane held while walking; the
+ *      mid-run failure parking the walk with the host error and the
+ *      failed card keeping its own row button; 继续更新剩余 resuming the
+ *      remaining queue; 收起 returning the idle entry), and the orphan
+ *      panel coexisting with a live market grid;
  *   8. summon tools (ticket #10) against a mocked tools/subagents/prompt
  *      seam over a dedicated scan fixture (the sister plugin's mock
  *      approach, this ticket's new build): the four-name deny list and its
@@ -337,9 +350,6 @@ fixtureWrite('team-x/agents/team-x-checker.md', [
   'displayName:',
   '  en: "Checker Person"',
   '  zh: "质检乙"',
-  'profession:',
-  '  en: "Checker"',
-  '  zh: "质检员"',
   '---',
   '',
   '# 质检',
@@ -499,7 +509,9 @@ assert.deepEqual(
     assert.ok(expert.avatarPath.endsWith(join('team-x', 'avatars', `${id}.png`)),
       `${id}: avatar hits its own <agentName>.png (never team.png / first PNG)`)
   }
-  assert.equal(lead.zhName, '队长甲', 'team zhName ← frontmatter displayName.zh')
+  assert.equal(lead.zhName, '队长', 'team zhName ← frontmatter profession.zh first (#22)')
+  assert.equal(checker.zhName, '质检乙',
+    'member with displayName.zh only → displayName.zh still serves as the fallback')
   assert.equal(maker.zhName, '制造工程师',
     'CRLF member without displayName takes zhName from frontmatter profession.zh')
   assert.ok(!maker.persona.includes('\r'), 'CRLF member persona is \\r-free')
@@ -2285,6 +2297,9 @@ for (const key of ['nav', 'title', 'subtitle', 'censusExperts', 'censusPlugins',
   'installDone', 'updateDone', 'uninstallDone',
   'installFailed', 'updateFailed', 'uninstallFailed',
   'orphansTitle', 'orphansHint', 'orphanBroken', 'orphanImported',
+  // #12 (P4): team group view + bulk update
+  'groupExpand', 'groupCollapse', 'groupMembers', 'installedCount', 'updatableCount', 'brokenCount',
+  'bulkUpdateBtn', 'bulkRunning', 'bulkFailedBody', 'bulkContinue', 'bulkDismiss', 'bulkDoneNotice',
   // #11: the summon entry points
   'summonButtonTitle', 'summonButtonLabel', 'summonMenuTitle', 'summonMenuEmpty',
   'summonFilter', 'summonFootnote', 'summonInstruction', 'summonInstructionWithTask',
@@ -2464,7 +2479,10 @@ let pageTree = expandTree(render(clientModule.MarketPage, { t: tZh, getLocale: (
   assert.ok(text.includes('/definitely/not/here'), 'banner names the raw stored path')
   assert.ok(text.includes('专家 3'), 'census counts the experts')
   assert.ok(text.includes('来源插件 3'), 'census counts the source plugins')
-  assert.ok(text.includes('后端架构师') && text.includes('队长'), 'cards render from the snapshot')
+  assert.ok(text.includes('后端架构师'), 'the solo card renders from the snapshot')
+  assert.ok(text.includes('mvp-dev-team') && text.includes('团队 ·8'),
+    'the team member renders as its collapsed group header (#12: members fold behind it)')
+  assert.ok(!text.includes('带队交付'), 'a collapsed group hides its member card bodies')
   assert.ok(text.includes('扫描警告 2 条'), 'the warnings fold announces its count')
   assert.equal(nodes.find((node) => node.props && node.props.className === 'wbm-warns-list'), undefined,
     'warnings are collapsed by default')
@@ -2946,6 +2964,8 @@ assert.equal(clientModule.formatWhen(undefined, 'zh'), '')
     node.props && node.props.className === 'wbm-orphan')
   assert.equal(orphanRows.length, 2, 'one row per orphan')
   assert.equal(orphanRows[1].props['data-broken'], 'true', 'the broken row is marked')
+  assert.ok(treeNodes(tree).some((node) => node.props && node.props.className === 'wbm-card'),
+    'the market grid renders alongside the orphans panel — the orphan region never blocks the market (#12)')
 
   // Uninstall the healthy orphan through the same confirm machine.
   const orphanUninstall = buttonsOf(orphanRows[0]).find((node) => treeText(node).trim() === '卸载')
@@ -2963,6 +2983,250 @@ assert.equal(clientModule.formatWhen(undefined, 'zh'), '')
   const panelAfter = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-orphans')
   assert.ok(treeText(panelAfter).includes('Dead'), 'the remaining orphan stays')
   assert.ok(!treeText(panelAfter).includes('wb-lefty'), 'the uninstalled orphan left the panel')
+}
+
+// ── 6d. the P4 interactions (ticket #12): team groups + bulk update ─────────
+//
+// The same storing React stub and scripted fetch drive the two #12 machines:
+// the group view (a pure grouping pass + the fold state machine) and the
+// serial bulk update (strict ordering, per-completion refetch, failure park
+// + continue). The pure derivations run first so the page assertions can
+// lean on them as ground truth.
+
+// The team fixture: three members of one plugin with mixed install states.
+const grpLead = { id: 'team-a-lead', name: 'Team A Lead', zhName: 'A 队长',
+  description: 'Leads team A.', zhDescription: '带队 A。', skills: [], pluginDir: 'team-a',
+  teamSize: 3, installed: true, updatable: false, broken: false }
+const grpMaker = { ...grpLead, id: 'team-a-maker', name: 'Team A Maker', zhName: 'A 制造',
+  description: 'Makes things.', zhDescription: '制造 A。', installed: true, updatable: true }
+const grpChecker = { ...grpLead, id: 'team-a-checker', name: 'Team A Checker', zhName: 'A 质检',
+  description: 'Checks things.', zhDescription: '质检 A。', installed: false, updatable: false }
+
+// groupCardsByPlugin: solo cards stay lone, teams collapse into one group in
+// first-card order; a filtered team still groups on the single survivor.
+{
+  const groups = clientModule.groupCardsByPlugin([mutFresh, grpLead, grpMaker, grpChecker])
+  assert.equal(groups.length, 2, 'one solo group + one team group')
+  assert.equal(groups[0].team, false, 'a lone solo card is not a group header candidate')
+  assert.deepEqual(groups[0].members.map((card) => card.id), ['backend-architect'])
+  assert.equal(groups[1].team, true)
+  assert.equal(groups[1].pluginDir, 'team-a')
+  assert.deepEqual(groups[1].members.map((card) => card.id), ['team-a-lead', 'team-a-maker', 'team-a-checker'],
+    'members keep the table order inside the group')
+  const filtered = clientModule.groupCardsByPlugin([grpMaker])
+  assert.equal(filtered.length, 1)
+  assert.equal(filtered[0].team, true, 'one surviving member of a filtered team still renders as its group')
+}
+// groupExpanded: undefined follows the filter mode; an explicit choice wins.
+assert.equal(clientModule.groupExpanded({}, 'team-a', false), false,
+  'default on the plain browse: collapsed')
+assert.equal(clientModule.groupExpanded({}, 'team-a', true), true,
+  'default under an active filter: expanded (matched members visible)')
+assert.equal(clientModule.groupExpanded({ 'team-a': false }, 'team-a', true), false,
+  'an explicit collapse beats the filter default')
+assert.equal(clientModule.groupExpanded({ 'team-a': true }, 'team-a', false), true,
+  'an explicit expand beats the plain-browse default')
+assert.equal(clientModule.groupExpanded(undefined, 'team-a', true), true, 'a null map degrades to the default')
+// groupStatsOf / updatableQueueOf: aggregation and queue eligibility.
+assert.deepEqual(clientModule.groupStatsOf([grpLead, grpMaker, grpChecker]),
+  { installed: 2, updatable: 1, broken: 0 }, 'status counts aggregate over the given members')
+assert.deepEqual(
+  clientModule.updatableQueueOf([mutFresh, grpMaker, { ...grpLead, updatable: true, broken: true }, grpLead])
+    .map((card) => card.id),
+  ['team-a-maker'],
+  'the bulk queue keeps table order, skips the uninstalled/installed-quiet, and never takes broken cards')
+
+// The page machine: collapsed by default, click expands, filter auto-expands,
+// explicit fold overrides — and the counting surfaces never changed caliber.
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const props = pageOf(mutState([grpLead, grpMaker, grpChecker, mutFresh]))
+  let tree = drawPage(props)
+  let text = treeText(tree)
+  let head = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-group-head')
+  assert.ok(head !== undefined, 'the team renders one collapsible group header')
+  assert.equal(head.props['aria-expanded'], 'false', 'collapsed by default on the plain browse')
+  assert.ok(text.includes('团队 ·3'), 'the header badge carries the plugin size')
+  assert.ok(text.includes('成员 3/3'), 'the header counts shown/total members')
+  assert.ok(text.includes('✓ 已装 2') && text.includes('↑ 可更新 1'),
+    'the header aggregates status counts over the shown members')
+  assert.ok(!text.includes('A 队长') && !text.includes('带队 A。'),
+    'a collapsed group renders none of its member cards')
+  assert.ok(text.includes('后端架构师'), 'the solo card renders flat, no header of its own')
+  assert.ok(text.includes('专家 4') && text.includes('来源插件 2'),
+    'census still counts expert cards and plugin dirs, not rendered headers')
+
+  // Click the header → members expand in place as ordinary cards.
+  head.props.onClick()
+  tree = drawPage(props)
+  text = treeText(tree)
+  head = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-group-head')
+  assert.equal(head.props['aria-expanded'], 'true', 'the header announces the expanded state')
+  assert.ok(text.includes('A 队长') && text.includes('A 质检'),
+    'the expanded group renders its member cards')
+
+  // A fresh mount under an active query: the group auto-expands (matched
+  // members visible without a second click) while the matchline keeps its
+  // expert-card caliber; an explicit fold then overrides the default.
+  resetMount()
+  let tree2 = drawPage(props)
+  treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-search')
+    .props.onChange({ target: { value: 'team-a' } })
+  tree2 = drawPage(props)
+  let text2 = treeText(tree2)
+  assert.ok(text2.includes('A 队长'), 'under an active query the group auto-expands')
+  assert.ok(text2.includes('匹配 3 位'), 'the matchline counts expert cards (three members hit)')
+  assert.ok(!text2.includes('后端架构师'), 'the non-matching solo card is filtered out')
+  treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-group-head')
+    .props.onClick() // effective state was open → the explicit choice is closed
+  tree2 = drawPage(props)
+  text2 = treeText(tree2)
+  assert.ok(!text2.includes('A 队长'), 'the explicit user fold wins over the filter default')
+  assert.ok(text2.includes('成员 3/3'), 'the collapsed header still shows the match shape')
+}
+
+// TeamGroup rendered directly over a FILTERED member set: shown/total split,
+// the full-size badge, stacked faces with the emoji fallback.
+{
+  resetMount()
+  const groupTree = expandTree(render(clientModule.TeamGroup, {
+    t: tZh, group: clientModule.groupCardsByPlugin([grpMaker])[0], expanded: false,
+    onToggle: () => {},
+  }))
+  const gtext = treeText(groupTree)
+  assert.ok(gtext.includes('团队 ·3'), 'the badge carries the plugin\'s FULL size, not the shown count')
+  assert.ok(gtext.includes('成员 1/3'), 'the shown side follows whatever filter is active')
+  assert.ok(gtext.includes('↑ 可更新 1'), 'marks aggregate over the SHOWN members only')
+  assert.ok(treeNodes(groupTree).some((node) =>
+    node.type === 'span' && node.props.className === 'wbm-gavatar'),
+    'the face stack renders (emoji fallback for a PNG-less member)')
+}
+
+// The bulk update: strictly serial, a state refetch after EVERY completion,
+// the lane held while walking, and the run unwinding into an ok notice.
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const upA = { ...mutFresh, installed: true, updatable: true }
+  const upB = { ...mutOther, installed: true, updatable: true }
+  const props = pageOf(mutState([upA, upB]))
+  let tree = drawPage(props)
+  assert.ok(buttonByExact(tree, '一键更新 2 位') !== undefined, 'the entry appears while updatables exist')
+  assert.equal(treeNodes(tree).filter((node) =>
+    node.props && node.props.className === 'wbm-bulk').length, 1,
+    'exactly one bulk bar renders (the idle entry)')
+
+  // Hold the FIRST update open: nothing else may fly (serial), the bar shows
+  // progress, and the shared lane disables refresh/apply/row buttons.
+  const heldUpdate = held(200, { ok: true, presetId: 'wb-backend-architect', warnings: [] })
+  fetchScript.push(reply(200, mutState([{ ...mutFresh, installed: true, updatable: false }, upB])))
+  fetchScript.push(reply(200, { ok: true, presetId: 'wb-dockerfile-gen', warnings: [] }))
+  fetchScript.push(reply(200, mutState([{ ...mutFresh, installed: true, updatable: false }, { ...mutOther, installed: true, updatable: false }])))
+  click(tree, '一键更新 2 位')
+  assert.equal(fetchLog[0].path, '/dsh-workbuddy-market/api/update', 'the walk starts with a POST update')
+  assert.deepEqual(fetchLog[0].body, { id: 'backend-architect' }, 'table order: first updatable card first')
+  assert.equal(fetchLog.length, 1, 'strictly serial — nothing else flies while update #1 is held')
+  tree = drawPage(props)
+  const bar = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-bulk')
+  assert.ok(bar !== undefined && bar.props['data-phase'] === 'running', 'the running bar shows')
+  assert.equal(bar.props['aria-busy'], 'true', 'the walk is announced busy')
+  assert.ok(treeText(bar).includes('正在更新 1/2：后端架构师'), 'progress names the current expert')
+  assert.equal(buttonByExact(tree, '刷新').props.disabled, true, 'the bulk run holds the shared mutation lane')
+  assert.equal(buttonByExact(tree, '应用').props.disabled, true, 'apply waits out the walk too')
+  assert.equal(buttonByExact(tree, '卸载').props.disabled, true, 'row buttons disable while walking')
+  assert.equal(buttonByExact(tree, '一键更新 2 位'), undefined, 'the idle entry is gone while running')
+
+  // Release: update #1 → state refetch (the finished card flips) → update #2
+  // → state refetch → done notice, bar gone.
+  heldUpdate.resolve()
+  await flush()
+  tree = drawPage(props)
+  assert.deepEqual(fetchLog.map((entry) => entry.path), [
+    '/dsh-workbuddy-market/api/update',
+    '/dsh-workbuddy-market/api/state',
+    '/dsh-workbuddy-market/api/update',
+    '/dsh-workbuddy-market/api/state',
+  ], 'the run is exactly update → state → update → state (逐个翻新: a refetch after EVERY completion)')
+  assert.deepEqual(fetchLog[2].body, { id: 'dockerfile-gen' }, 'the second entry walks only after the first landed')
+  const notice = noticeOf(tree)
+  assert.ok(notice !== undefined && notice.props['data-kind'] === 'ok' &&
+    treeText(notice).includes('一键更新完成：成功 2 位'), 'completion lands as an ok notice')
+  assert.equal(treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-bulk'),
+    undefined, 'the bar is gone with no updatables left')
+}
+
+// The mid-run failure: the walk parks with the host error, releases the lane,
+// keeps the failed card's own row button — and 继续更新剩余 resumes the
+// REMAINING queue (the failed entry is never retried by the resume itself).
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const upA = { ...mutFresh, installed: true, updatable: true }
+  const upB = { ...mutOther, installed: true, updatable: true }
+  const props = pageOf(mutState([upA, upB]))
+  let tree = drawPage(props)
+  fetchScript.push(reply(500, { error: 'manifest corrupted on the way' }))
+  fetchScript.push(reply(200, { ok: true, presetId: 'wb-dockerfile-gen', warnings: [] }))
+  fetchScript.push(reply(200, mutState([upA, { ...mutOther, installed: true, updatable: false }])))
+  click(tree, '一键更新 2 位')
+  await flush()
+  tree = drawPage(props)
+  const bar = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-bulk')
+  assert.ok(bar !== undefined && bar.props['data-phase'] === 'failed' && bar.props.role === 'alert',
+    'a failed entry parks the walk in a failure box')
+  const barText = treeText(bar)
+  assert.ok(barText.includes('一键更新中断：后端架构师'), 'the failure names the stopped entry')
+  assert.ok(barText.includes('更新失败'), 'the localized failure prefix rides along')
+  assert.ok(barText.includes('manifest corrupted on the way'), 'the host error rides along')
+  assert.notEqual(buttonByExact(tree, '刷新').props.disabled, true, 'a failed run releases the mutation lane')
+  const firstCard = treeNodes(tree).filter((node) =>
+    node.props && node.props.className === 'wbm-card')[0]
+  assert.ok(treeText(firstCard).includes('↑ 可更新'), 'the failed card stays updatable')
+  assert.notEqual(buttonByExact(tree, '更新').props.disabled, true,
+    'its own row update button is usable again right after the failure')
+
+  click(tree, '继续更新剩余 1 位')
+  await flush()
+  tree = drawPage(props)
+  assert.deepEqual(fetchLog.map((entry) => entry.path), [
+    '/dsh-workbuddy-market/api/update',
+    '/dsh-workbuddy-market/api/update',
+    '/dsh-workbuddy-market/api/state',
+  ], 'continue walks the REMAINING entry only — the failed one is skipped, and failure never refetched state')
+  assert.deepEqual(fetchLog[1].body, { id: 'dockerfile-gen' }, 'the resume starts at the next entry')
+  const notice = noticeOf(tree)
+  assert.ok(notice !== undefined && treeText(notice).includes('一键更新完成：成功 1 位'),
+    'the resumed run finishes counting its own successes')
+  const barAfter = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-bulk')
+  assert.ok(barAfter !== undefined && barAfter.props['data-phase'] === 'idle',
+    'the parked failure is gone — the bar is back to the idle entry')
+  assert.ok(buttonByExact(tree, '一键更新 1 位') !== undefined,
+    'the still-updatable failed card keeps the bulk entry available for another go')
+}
+
+// 收起 drops a parked failure: the bar returns to the idle entry, which now
+// offers the still-updatable cards afresh.
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const upA = { ...mutFresh, installed: true, updatable: true }
+  const upB = { ...mutOther, installed: true, updatable: true }
+  const props = pageOf(mutState([upA, upB]))
+  let tree = drawPage(props)
+  fetchScript.push(reply(500, { error: 'boom' }))
+  click(tree, '一键更新 2 位')
+  await flush()
+  click(drawPage(props), '收起')
+  tree = drawPage(props)
+  const bar = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-bulk')
+  assert.equal(bar.props['data-phase'], 'idle', 'dismiss returns the bar to the idle entry')
+  assert.ok(buttonByExact(tree, '一键更新 2 位') !== undefined,
+    'the entry offers the full queue again after a dismissed run')
 }
 
 globalThis.fetch = realFetch

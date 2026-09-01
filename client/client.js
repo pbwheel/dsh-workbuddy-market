@@ -68,6 +68,26 @@
  * scoped <style data-plugin> tag is injected inside apply() and removed by
  * the disposer apply() returns, so the cleanup is owned by this fiber
  * rather than delegated to the module loader.
+ *
+ * Ticket #12 (P4 polish) rounds the market page out on the same file:
+ *
+ *   - the team group view: cards are grouped by their source plugin; a
+ *     team renders as ONE collapsible section (caret, the first four
+ *     members' faces, the mono plugin dir, the team badge, shown/total
+ *     counts, and aggregated ✓/↑/⚠ counts over the SHOWN members) whose
+ *     members expand in place as ordinary cards. Solo cards are untouched.
+ *     Grouping is presentation only — chips, the matchline, and the census
+ *     keep counting expert cards; a query or filter chip expands every
+ *     group by default so matched members are visible without a second
+ *     click, and an explicit user fold wins over that default either way;
+ *   - the bulk update (一键全更): one entry button while any card is
+ *     updatable, then a SERIAL walk — one /api/update at a time, a fresh
+ *     /api/state after every completion so each finished card flips
+ *     within a second, then the next. A mid-run failure parks the walk
+ *     with the remaining queue and the host error; 继续更新剩余 resumes
+ *     the walk from the next entry (the failed card keeps its own ↑ and
+ *     row button). The run holds the page's shared mutation lane while
+ *     walking and releases it on failure.
  */
 window.__ModuleLoader__.load({ id: "dsh-workbuddy-market", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
@@ -204,6 +224,35 @@ var CSS = `
 .wbm-mark[data-kind="bad"] { color: var(--dsw-alias-state-warn-primary, #c77700); }
 .wbm-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 
+/* ── the team group view (#12): one collapsible section per team ─────────── */
+.wbm-group { grid-column: 1 / -1; list-style: none; }
+.wbm-group-head { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; width: 100%;
+  box-sizing: border-box; padding: 10px 12px; font-size: 12px; line-height: 1.5; text-align: left;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.28)); border-radius: 12px; cursor: pointer;
+  background: var(--dsw-alias-bg-layer-1, transparent); color: var(--dsw-alias-label-secondary, inherit); }
+.wbm-group-head:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.06)); }
+.wbm-group-caret { flex: none; font-size: 10px; line-height: 1; color: var(--dsw-alias-label-tertiary, inherit); }
+.wbm-group-faces { flex: none; display: inline-flex; align-items: center; }
+.wbm-gavatar { width: 20px; height: 20px; border-radius: 6px; object-fit: cover; font-size: 11px;
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+  background: var(--dsw-alias-bg-layer-2, rgba(127,127,127,.18)); box-sizing: content-box;
+  border: 2px solid var(--dsw-alias-bg-layer-1, transparent); margin-right: -6px; }
+.wbm-group-name { font-family: ${MONO}; font-size: 11px; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-tertiary, inherit); }
+.wbm-group-count { font-family: ${MONO}; font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary, inherit); white-space: nowrap; }
+.wbm-group-marks { display: inline-flex; gap: 4px 10px; flex-wrap: wrap; }
+
+/* ── the bulk-update bar (#12): entry, progress, failure + continue ───────── */
+.wbm-bulk { display: flex; gap: 8px 10px; flex-wrap: wrap; align-items: center;
+  padding: 8px 12px; font-size: 12px; line-height: 1.6; border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.28)); }
+.wbm-bulk[data-phase="running"] { color: var(--dsw-alias-brand-primary, #4f6ef7);
+  border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #4f6ef7) 40%, transparent); }
+.wbm-bulk[data-phase="failed"] { color: var(--dsw-alias-state-error-primary, #d5484f);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d5484f) 42%, transparent); }
+.wbm-bulk-text { flex: 1 1 240px; min-width: 0; overflow-wrap: anywhere; }
+
 /* ── the orphans panel: installed from another source (#9) ───────────────── */
 .wbm-orphans { border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.28)); border-radius: 12px;
   padding: 12px; display: flex; flex-direction: column; gap: 8px; }
@@ -289,7 +338,7 @@ img.wbm-summon-emoji { width: 20px; height: 20px; border-radius: 6px; object-fit
 /* ── quality floor: visible keyboard focus, calm motion ──────────────────── */
 .wbm-btn:focus-visible, .wbm-chip:focus-visible, .wbm-search:focus-visible, .wbm-path-input:focus-visible,
 .wbm-warns-toggle:focus-visible, .wbm-summon-btn:focus-visible, .wbm-summon-item:focus-visible,
-.wbm-summon-filter:focus-visible {
+.wbm-summon-filter:focus-visible, .wbm-group-head:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary, currentColor); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .wbm-skel-card { animation: none; }
@@ -382,6 +431,19 @@ var DICTS = {
     orphansHint: '这些 preset 装自别的源目录（或其专家已不在当前源中）——只呈列，不自动卸载；确认后可按 id 卸载。',
     orphanBroken: '清单异常',
     orphanImported: '安装于 {when}',
+    // ── #12 (P4): team group view + bulk update ───────────────────────────
+    groupExpand: '展开团队成员',
+    groupCollapse: '收起团队成员',
+    groupMembers: '成员 {shown}/{total}',
+    installedCount: '已装 {n}',
+    updatableCount: '可更新 {n}',
+    brokenCount: '损坏 {n}',
+    bulkUpdateBtn: '一键更新 {n} 位',
+    bulkRunning: '正在更新 {done}/{total}：{name}',
+    bulkFailedBody: '一键更新中断：{name}：{error}',
+    bulkContinue: '继续更新剩余 {n} 位',
+    bulkDismiss: '收起',
+    bulkDoneNotice: '一键更新完成：成功 {done} 位',
     // ── #11: the summon entry points (button + '@' source) ────────────────
     summonButtonTitle: '召唤专家',
     summonButtonLabel: '召唤专家',
@@ -451,6 +513,19 @@ var DICTS = {
     orphansHint: 'These presets came from another source directory (or their expert left this one) — listed, never auto-uninstalled; confirm to uninstall by id.',
     orphanBroken: 'manifest broken',
     orphanImported: 'installed {when}',
+    // ── #12 (P4): team group view + bulk update ───────────────────────────
+    groupExpand: 'Expand team members',
+    groupCollapse: 'Collapse team members',
+    groupMembers: '{shown}/{total} members',
+    installedCount: '{n} installed',
+    updatableCount: '{n} updatable',
+    brokenCount: '{n} broken',
+    bulkUpdateBtn: 'Update all ({n})',
+    bulkRunning: 'Updating {done}/{total}: {name}',
+    bulkFailedBody: 'Bulk update stopped at {name}: {error}',
+    bulkContinue: 'Continue with {n} remaining',
+    bulkDismiss: 'Dismiss',
+    bulkDoneNotice: 'Bulk update finished: {done} updated',
     // ── #11: the summon entry points (button + '@' source) ────────────────
     summonButtonTitle: 'Summon expert',
     summonButtonLabel: 'Summon expert',
@@ -596,6 +671,82 @@ function filterExperts (experts, filter, query) {
     if (!keep(expert)) return false
     if (q === '') return true
     return haystackOf(expert).indexOf(q) !== -1
+  })
+}
+
+// ── the team group view (#12, P4): cards grouped by source plugin ────────────
+
+/**
+ * Group ALREADY-FILTERED cards by their source plugin directory, in
+ * first-card order (the scan's deterministic order — id-sorted within the
+ * table, so groups appear in a stable arrangement). A group whose plugin is
+ * a team (`teamSize > 1` on any member, or several members surviving the
+ * filter) renders as a collapsible group; a lone solo card renders exactly
+ * as the un-grouped grid always did. The grouping is PRESENTATION ONLY:
+ * chips, match counts, and the census keep counting EXPERT CARDS, so the
+ * aggregation never changes what a filter claims to match.
+ */
+function groupCardsByPlugin (experts) {
+  var groups = []
+  var byDir = {}
+  for (var i = 0; i < experts.length; i++) {
+    var expert = experts[i]
+    var dir = strOf(expert.pluginDir)
+    var key = dir !== '' ? dir : '·no-plugin·'
+    var group = byDir[key]
+    if (group === undefined) {
+      group = { pluginDir: key, members: [], team: false }
+      byDir[key] = group
+      groups.push(group)
+    }
+    group.members.push(expert)
+  }
+  for (var g = 0; g < groups.length; g++) {
+    // teamSize is per-plugin-directory, so every member agrees; several
+    // members alone (a filtered team) still group even when one survives.
+    groups[g].team = groups[g].members.length > 1 || isTeam(groups[g].members[0])
+  }
+  return groups
+}
+
+/**
+ * Whether one team group stands expanded. `openMap` holds the user's
+ * EXPLICIT choice per pluginDir: true forces open, false forces closed,
+ * undefined follows the default — collapsed on the plain browse, expanded
+ * whenever a query or filter chip is active (matched members must be
+ * visible without a second click). The explicit choice wins either way, so
+ * collapsing a noisy group under an active filter STAYS collapsed.
+ */
+function groupExpanded (openMap, pluginDir, filteredActive) {
+  var choice = openMap === null || openMap === undefined ? undefined : openMap[pluginDir]
+  if (choice === true) return true
+  if (choice === false) return false
+  return filteredActive === true
+}
+
+/** Aggregate status counts over a group's (filtered) members. */
+function groupStatsOf (members) {
+  var out = { installed: 0, updatable: 0, broken: 0 }
+  for (var i = 0; i < members.length; i++) {
+    var expert = members[i]
+    if (expert.installed === true) out.installed++
+    if (expert.updatable === true) out.updatable++
+    if (expert.broken === true) out.broken++
+  }
+  return out
+}
+
+/**
+ * The bulk-update queue (#12): every card the host flags updatable, in
+ * table order. Broken cards never join — the host never marks a broken
+ * preset updatable (its fix is 卸载重装), and cardActionsOf already offers
+ * such cards uninstall only.
+ */
+function updatableQueueOf (experts) {
+  if (!Array.isArray(experts)) return []
+  return experts.filter(function (expert) {
+    return expert !== null && typeof expert === 'object' &&
+      expert.updatable === true && expert.broken !== true
   })
 }
 
@@ -822,6 +973,63 @@ function ExpertCard (props) {
       })))
 }
 
+// ── the team group header (#12): one collapsible source-plugin section ─────
+
+/**
+ * The full-width header of one team group: a caret, a stacked row of member
+ * faces (the first four members' PNG avatars, emoji fallback each), the mono
+ * plugin directory, the team badge with the plugin's full size, the
+ * shown/total member count (the shown side follows whatever filter is
+ * active), and aggregated status counts over the SHOWN members. The member
+ * cards themselves are appended by the page as ordinary ExpertCards right
+ * after this header — grouping changes arrangement, never card capability.
+ */
+function TeamGroup (props) {
+  var t = props.t
+  var group = props.group
+  var expanded = props.expanded === true
+  var members = group.members
+  var stats = groupStatsOf(members)
+  var teamSize = typeof members[0].teamSize === 'number' && members[0].teamSize > members.length
+    ? members[0].teamSize : members.length
+
+  var faces = []
+  var faceCount = Math.min(members.length, 4)
+  for (var i = 0; i < faceCount; i++) {
+    faces.push(el(AvatarFace, {
+      key: strOf(members[i].id), expert: members[i],
+      imgClass: 'wbm-gavatar', glyphClass: 'wbm-gavatar'
+    }))
+  }
+
+  var marks = []
+  if (stats.broken > 0) {
+    marks.push(el('span', { key: 'broken', className: 'wbm-mark', 'data-kind': 'bad' }, '⚠ ', t('brokenCount', { n: stats.broken })))
+  }
+  if (stats.installed > 0) {
+    marks.push(el('span', { key: 'installed', className: 'wbm-mark', 'data-kind': 'ok' }, '✓ ', t('installedCount', { n: stats.installed })))
+  }
+  if (stats.updatable > 0) {
+    marks.push(el('span', { key: 'updatable', className: 'wbm-mark', 'data-kind': 'upd' }, '↑ ', t('updatableCount', { n: stats.updatable })))
+  }
+
+  return el('li', { className: 'wbm-group' },
+    el('button', {
+      className: 'wbm-group-head', type: 'button',
+      'aria-expanded': expanded ? 'true' : 'false',
+      title: t(expanded ? 'groupCollapse' : 'groupExpand'),
+      onClick: function () {
+        if (typeof props.onToggle === 'function') props.onToggle(group.pluginDir)
+      }
+    },
+      el('span', { className: 'wbm-group-caret', 'aria-hidden': 'true' }, expanded ? '▾' : '▸'),
+      faces.length > 0 ? el('span', { className: 'wbm-group-faces', 'aria-hidden': 'true' }, faces) : null,
+      el('span', { className: 'wbm-group-name', title: group.pluginDir }, group.pluginDir),
+      el('span', { className: 'wbm-badge', 'data-kind': 'team' }, t('teamBadge', { n: teamSize })),
+      el('span', { className: 'wbm-group-count' }, t('groupMembers', { shown: members.length, total: teamSize })),
+      marks.length > 0 ? el('span', { className: 'wbm-group-marks' }, marks) : null))
+}
+
 // ── the orphan rows (#9) ─────────────────────────────────────────────────────
 
 /**
@@ -877,6 +1085,48 @@ function OrphanRow (props) {
         if (typeof props.onAction === 'function') props.onAction(orphan, action)
       }
     }))
+}
+
+// ── the bulk-update bar (#12): entry / progress / failure + continue ────────
+
+/**
+ * The one-line bulk-update strip above the grid (#12). Idle with updatable
+ * cards → the primary entry (disabled while any other lane flight holds the
+ * shared lane); running → live progress (done+1 of total, the current
+ * expert) with aria-busy; failed → the failed entry with the host error and
+ * the two ways out: 继续更新剩余 (re-enters the walk with the remaining
+ * queue) or 收起 (drop the run — every card keeps its own row buttons).
+ */
+function BulkBar (props) {
+  var t = props.t
+  var bulk = props.bulk
+  var laneBusy = props.laneBusy === true
+
+  if (bulk !== null && bulk !== undefined && bulk.phase === 'running') {
+    return el('div', { className: 'wbm-bulk', 'data-phase': 'running', role: 'status', 'aria-busy': 'true' },
+      el('span', { className: 'wbm-bulk-text' },
+        t('bulkRunning', { done: bulk.done + 1, total: bulk.total, name: bulk.current.name })))
+  }
+  if (bulk !== null && bulk !== undefined && bulk.phase === 'failed') {
+    return el('div', { className: 'wbm-bulk', 'data-phase': 'failed', role: 'alert' },
+      el('span', { className: 'wbm-bulk-text' },
+        t('bulkFailedBody', { name: bulk.failed.name, error: bulk.error })),
+      el('button', {
+        className: 'wbm-btn', type: 'button', 'data-variant': 'primary',
+        disabled: laneBusy || bulk.queue.length === 0,
+        onClick: props.onContinue
+      }, t('bulkContinue', { n: bulk.queue.length })),
+      el('button', { className: 'wbm-btn', type: 'button', onClick: props.onDismiss }, t('bulkDismiss')))
+  }
+  if (props.count > 0) {
+    return el('div', { className: 'wbm-bulk', 'data-phase': 'idle' },
+      el('button', {
+        className: 'wbm-btn', type: 'button', 'data-variant': 'primary',
+        disabled: laneBusy,
+        onClick: props.onStart
+      }, t('bulkUpdateBtn', { n: props.count })))
+  }
+  return null
 }
 
 // ── the refresh icon (#9) ────────────────────────────────────────────────────
@@ -948,6 +1198,27 @@ function MarketPage (props) {
   var savingState = React.useState(false)
   var setSaving = savingState[1]
   var saving = savingState[0]
+
+  // ── #12 (P4): the bulk-update run and the team-group fold ────────────────
+  // bulk: null when idle; otherwise
+  //   { phase: 'running', current: {id,name}, queue: [entry…], done, total }
+  //   { phase: 'failed', failed: {id,name}, error, queue: [entry…], done, total }
+  // Only 'running' holds the mutation lane (a failed run releases it — the
+  // continue button re-takes it); the queue holds the entries AFTER the
+  // current/failed one, so 中途失败 → 继续更新剩余 skips the failed card
+  // (it stays updatable with its own row button).
+  var bulkState = React.useState(null)
+  var setBulk = bulkState[1]
+  var bulk = bulkState[0]
+  var bulkRunning = bulk !== null && bulk !== undefined && bulk.phase === 'running'
+
+  // openGroups: the user's EXPLICIT per-pluginDir choice for team groups —
+  // true forces open, false forces closed, undefined follows the default
+  // (collapsed on the plain browse, expanded under an active query/filter so
+  // matched members are visible without a second click).
+  var openGroupsState = React.useState({})
+  var setOpenGroups = openGroupsState[1]
+  var openGroups = openGroupsState[0]
 
   // A config 409 SETTINGS_CONFLICT: { expected, actual } — both revisions
   // shown, retry re-pulls and replays.
@@ -1085,7 +1356,7 @@ function MarketPage (props) {
   }
 
   var draftTrimmed = draftPath.trim()
-  var applyDisabled = saving || refreshing || busyKey !== '' ||
+  var applyDisabled = saving || refreshing || busyKey !== '' || bulkRunning ||
     draftTrimmed === '' || draftTrimmed === syncedRef.current
 
   var onApply = function () {
@@ -1103,7 +1374,7 @@ function MarketPage (props) {
    * acceptance's 可重试成功. A failed pull leaves the conflict box up.
    */
   var onConflictRetry = function () {
-    if (saving || refreshing || busyKey !== '') return
+    if (saving || refreshing || busyKey !== '' || bulkRunning) return
     setNotice(null)
     setSaving(true)
     pullState().then(function (payload) {
@@ -1114,7 +1385,7 @@ function MarketPage (props) {
 
   /** POST /api/refresh — forced rescan; spinner + disabled for the flight. */
   var onRefresh = function () {
-    if (refreshing || saving || busyKey !== '') return
+    if (refreshing || saving || busyKey !== '' || bulkRunning) return
     setNotice(null)
     setRefreshing(true)
     postJson(API_BASE + '/refresh', {}).then(function (payload) {
@@ -1147,10 +1418,11 @@ function MarketPage (props) {
     }).then(function () { setBusyKey('') })
   }
 
-  // Any lane flight of this page: a row action, the refresh, or the apply.
-  // Row actions guard on it AND their buttons disable under it — the host's
-  // lane is shared, so a click through another flight could only 409.
-  var laneBusy = busyKey !== '' || refreshing || saving
+  // Any lane flight of this page: a row action, the refresh, the apply, or a
+  // bulk-update run (#12). Row actions guard on it AND their buttons disable
+  // under it — the host's lane is shared, so a click through another flight
+  // could only 409.
+  var laneBusy = busyKey !== '' || refreshing || saving || bulkRunning
 
   var onCardAction = function (expert, action) {
     if (laneBusy) return
@@ -1175,6 +1447,73 @@ function MarketPage (props) {
 
   var onActionConfirm = function (key) { setConfirmKey(key) }
   var onCancelConfirm = function () { setConfirmKey('') }
+
+  /**
+   * Toggle one team group's fold: the user's choice flips from the group's
+   * CURRENT EFFECTIVE state (explicit choice, or the default under the
+   * active-filter mode) and is then stored explicitly — it wins over the
+   * default from then on, in either direction (#12).
+   */
+  var onToggleGroup = function (pluginDir) {
+    setOpenGroups(function (prev) {
+      var next = {}
+      for (var key in prev) {
+        if (Object.prototype.hasOwnProperty.call(prev, key)) next[key] = prev[key]
+      }
+      next[pluginDir] = !groupExpanded(prev, pluginDir, filteredActive)
+      return next
+    })
+  }
+
+  /**
+   * The serial bulk-update walk (#12): one /api/update at a time, a fresh
+   * /api/state after EVERY completion (the finished card flips ✓ within a
+   * second — 逐个翻新), then the next entry. A failure stops the walk and
+   * parks phase:'failed' with the REMAINING queue (the failed entry itself
+   * is skipped — it keeps its ↑ and its own row button); 继续更新剩余
+   * re-enters here with that queue and the progress earned so far.
+   */
+  var startBulkRun = function (queue, doneBase) {
+    var total = doneBase + queue.length
+    var runQueue = queue.slice()
+    var done = doneBase
+    setConfirmKey('')
+    setNotice(null)
+    var step = function () {
+      var entry = runQueue[0]
+      setBulk({ phase: 'running', current: entry, queue: runQueue.slice(1), done: done, total: total })
+      postJson(API_BASE + '/update', { id: entry.id }).then(function () {
+        return pullState()
+      }).then(function () {
+        done += 1
+        runQueue = runQueue.slice(1)
+        if (runQueue.length === 0) {
+          setBulk(null)
+          setNotice({ kind: 'ok', text: t('bulkDoneNotice', { done: done }) })
+        } else {
+          step()
+        }
+      }, function (err) {
+        setBulk({
+          phase: 'failed', failed: entry, error: failText('updateFailed', err),
+          queue: runQueue.slice(1), done: done, total: total,
+        })
+      })
+    }
+    step()
+  }
+
+  /** 一键更新 entry: every updatable card (broken ones never join), in table order. */
+  var onBulkUpdate = function () {
+    if (laneBusy) return
+    startBulkRun(updatableQueue, 0)
+  }
+
+  /** Continue a failed run with the remaining queue; the lane is free again. */
+  var onBulkContinue = function () {
+    if (laneBusy || bulk === null || bulk.phase !== 'failed') return
+    startBulkRun(bulk.queue, bulk.done)
+  }
 
   var onDraftChange = function (event) {
     var value = event !== null && event !== undefined && event.target !== null && event.target !== undefined
@@ -1219,6 +1558,21 @@ function MarketPage (props) {
   // skeleton, not the empty state, owns the first paint.
   var loading = experts === null
 
+  // The bulk-update queue over the FULL table (#12): filtering rearranges
+  // the grid but never changes what 一键更新 covers; broken cards never
+  // join (their fix is 卸载重装, and the host never flags them updatable).
+  var updatableQueue = React.useMemo(function () {
+    if (experts === null) return []
+    return updatableQueueOf(experts).map(function (expert) {
+      return { id: strOf(expert.id), name: localeNameOf(expert, localeId) }
+    })
+  }, [experts, localeId])
+
+  // Whether a query or filter chip is active — the team groups' DEFAULT fold
+  // follows it (expanded under filtering so matched members are visible
+  // without a second click; collapsed on the plain browse).
+  var filteredActive = !loading && (query.trim() !== '' || filter !== 'all')
+
   var cards = null
   if (loading) {
     cards = el('div', { 'aria-hidden': 'true' },
@@ -1234,18 +1588,45 @@ function MarketPage (props) {
       el('p', { className: 'wbm-empty-tip' }, t('emptyTip')),
       el('button', { className: 'wbm-btn', type: 'button', onClick: clearFilters }, t('clearFilters')))
   } else {
-    cards = el('ul', { className: 'wbm-grid' },
-      filtered.map(function (expert) {
-        return el(ExpertCard, {
-          key: strOf(expert.id), t: t, expert: expert, localeId: localeId,
-          laneBusy: laneBusy, busyKey: busyKey, confirmKey: confirmKey,
-          onActionConfirm: onActionConfirm, onCancelConfirm: onCancelConfirm,
-          onAction: onCardAction
-        })
+    // The grouped grid (#12): solo cards render exactly as they always did;
+    // a team's members sit behind one collapsible group header. Grouping is
+    // presentation only — the chips, the matchline, and the census above
+    // kept counting EXPERT CARDS.
+    var cardOf = function (expert) {
+      return el(ExpertCard, {
+        key: strOf(expert.id), t: t, expert: expert, localeId: localeId,
+        laneBusy: laneBusy, busyKey: busyKey, confirmKey: confirmKey,
+        onActionConfirm: onActionConfirm, onCancelConfirm: onCancelConfirm,
+        onAction: onCardAction
+      })
+    }
+    var items = []
+    var groups = groupCardsByPlugin(filtered)
+    for (var gi = 0; gi < groups.length; gi++) {
+      var group = groups[gi]
+      if (!group.team) {
+        items.push(cardOf(group.members[0]))
+        continue
+      }
+      var expanded = groupExpanded(openGroups, group.pluginDir, filteredActive)
+      items.push(el(TeamGroup, {
+        key: 'group:' + group.pluginDir, t: t, group: group, expanded: expanded,
+        onToggle: onToggleGroup
       }))
+      if (expanded) {
+        for (var mi = 0; mi < group.members.length; mi++) items.push(cardOf(group.members[mi]))
+      }
+    }
+    cards = el('ul', { className: 'wbm-grid' }, items)
   }
 
-  var filteredActive = !loading && (query.trim() !== '' || filter !== 'all')
+  // The bulk-update strip (#12) — the phase picks the shape inside BulkBar;
+  // no updatable cards and no run → it renders nothing at all.
+  var bulkBar = el(BulkBar, {
+    t: t, bulk: bulk, laneBusy: laneBusy, count: loading ? 0 : updatableQueue.length,
+    onStart: onBulkUpdate, onContinue: onBulkContinue,
+    onDismiss: function () { setBulk(null) },
+  })
 
   return el('div', { className: 'wbm-page' },
     el('header', { className: 'wbm-head' },
@@ -1279,7 +1660,7 @@ function MarketPage (props) {
         title: t('refreshBtn'),
         'aria-label': t('refreshBtn'),
         'aria-busy': refreshing ? 'true' : undefined,
-        disabled: refreshing || saving || busyKey !== '',
+        disabled: refreshing || saving || busyKey !== '' || bulkRunning,
         onClick: onRefresh
       },
         refreshIcon(refreshing),
@@ -1292,7 +1673,7 @@ function MarketPage (props) {
               t('conflictDetail', { expected: conflict.expected, actual: conflict.actual }))),
           el('button', {
             className: 'wbm-btn', type: 'button',
-            disabled: saving || refreshing || busyKey !== '',
+            disabled: saving || refreshing || busyKey !== '' || bulkRunning,
             onClick: onConflictRetry
           }, t('conflictRetry')))
       : null,
@@ -1354,6 +1735,9 @@ function MarketPage (props) {
           t('loadFailed') + '：' + error + ' ',
           el('button', { className: 'wbm-btn', type: 'button', onClick: pullState }, t('retry')))
       : null,
+    // The bulk-update bar (#12): entry only while updatables exist, progress
+    // while the serial walk runs, failure + 继续更新剩余 when one entry dies.
+    bulkBar,
     cards,
     orphans.length > 0
       ? el('section', { className: 'wbm-orphans', 'aria-label': t('orphansTitle') },
@@ -1826,6 +2210,11 @@ module.exports.cardActionsOf = cardActionsOf
 module.exports.formatWhen = formatWhen
 module.exports.ExpertCard = ExpertCard
 module.exports.OrphanRow = OrphanRow
+module.exports.TeamGroup = TeamGroup
+module.exports.groupCardsByPlugin = groupCardsByPlugin
+module.exports.groupExpanded = groupExpanded
+module.exports.groupStatsOf = groupStatsOf
+module.exports.updatableQueueOf = updatableQueueOf
 module.exports.MarketPage = MarketPage
 module.exports.fetchInstalledExperts = fetchInstalledExperts
 module.exports.buildSummonInstruction = buildSummonInstruction

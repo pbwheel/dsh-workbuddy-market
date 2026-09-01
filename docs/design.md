@@ -57,7 +57,7 @@ client/client.js                       src/index.js（host 入口，三段 injec
 |---|---|
 | frontmatter `name` | `id`（必须过 `ID_RE = /^[a-z0-9][a-z0-9-]*$/`） |
 | `displayName.en` ?? `name` | `name`（基字段，en） |
-| plugin.json `profession.zh`（单体）→ frontmatter `displayName.zh` ?? `profession.zh`（团队卡）→ `name` | `zhName`（实测 displayName 类字段常为品牌名/人名——「鹏城信息AI专家」「吴八哥」，`profession.zh` 才是职能名「后端架构师」；实测 18/50 agent 文件无 frontmatter displayName/profession，plugin.json 恰好补位；P2 出卡片后回头校验，见 §10 P4） |
+| plugin.json `profession.zh`（单体首选）→ frontmatter `displayName.zh` ?? `profession.zh`（单体后续兜底）；团队卡 = frontmatter `profession.zh` ?? `displayName.zh`（#22 调序）；末端正文首 H1（#19）→ `name` | `zhName`（displayName 类字段常为品牌名/人名——「鹏城信息AI专家」「吴八哥」，`profession.zh` 才是职能名「后端架构师」；实测 18/50 agent 文件无 frontmatter displayName/profession，plugin.json 恰好补位；P4 实证抽查已定案，见 #22） |
 | `description`（use-when 触发描述） | `description` |
 | plugin.json `displayDescription.zh`（实测 41/41 单体插件皆有）→ README.md 首个非标题段落（启发式兜底） | `zhDescription`（#12；README 兜底注意团队插件可能带 README_EN.md、README.md 首段是英文） |
 | agent 正文 + `rules/*.md` 逐个带标题追加 | `persona`（`{{…}}` 非注册变量组拆括号转义，见下「模板转义」——不转义会让子代理/preset 启动失败；CRLF 行尾统一 strip，见上 #14） |
@@ -168,7 +168,8 @@ dsh-workbuddy-market/
   src/schemastery.js      # link 安装下 @deepseek-ai/schemastery 的运行时锚定解析（T1 新增）
   client/client.js
   scripts/smoke.mjs       # 离线冒烟（自建 fixture 假 WorkBuddy 树，见 §9）
-  LICENSE  README.md
+  scripts/zhname-audit.mjs # zhName 优先级实证抽查（真实语料只读，#22 的证据载体）
+  LICENSE  README.md  README.en.md
 ```
 
 **没有 `data/` 目录**——这是本插件与姊妹插件最大的结构差异，也是隐私边界的体现。
@@ -225,5 +226,6 @@ P1 结束即可用 API 驱动安装（curl 可验）；P2 才有页面；P3 召�
 | 19 | zhName 末端兜底（T2 实施新增） | 正文首 H1 的括号职能名作**最后一个中文来源**插在 `name` 兜底之前（仅接受含 Han 且 ≤40 字；无括号取整个标题）：实测 4 个专家（design-to-code / dockerfile-gen / product-management / remotion-video-generator）frontmatter 与 plugin.json 均无任何中文元数据，设计链必然落到英文 `name`，而工票 #3 验收要求「18 个无 frontmatter displayName 的专家全部取到中文职能名、无英文 id 兜底」——这 4 个的正文 H1 恰为「品牌（职能名）」形（`图变码（设计转代码专家）`）。**只增不改**：设计链能命中的专家 zhName 分毫不变；末端兜底仍按 §2 表落到 `name`（displayName.en ?? id），不落裸 id。另：root 不存在的 warning 由 state 层（pathExists）报出，scanner 不重复报（§2 行为口径不变，实现分工在此注明） | §2 |
 | 20 | 指纹清单的可见性对齐（T3 实施新增） | 逐插件清单条目**含目录本身**（`agents/ skills/ rules/ avatars/` 深度 ≤3 内的目录也按 `(相对路径, mtimeMs, size)` 入清单），不只收文件：`skills/` 的**空子目录**无任何文件却直接改扫描输出（skills 名单 = 子目录名所见，#15），只收文件会漏检；`git:` 前缀插件目录**不入**插件目录名清单也不 walked——scanner 整体跳过它们，输出永不为它们所动，键也必须不能（⟺ 可见性对齐，含 root 级点目录：scanner 扫它们，键也收）；named 子目录内的点条目与 symlink 同 scanner 的 listDir 一样不可见、不入清单；不可达 root（缺失/不可读）哈希为稳定标记——空扫描照样可缓存；并发同 (路径, 指纹) 的 stateOf 合并到单个在途扫描 | §2 |
 | 21 | 安装期实施口径（T4 实施新增） | 三项只增不改的实施决定：**① 同源重复安装 = remove → 重拷的幂等重装**（copy() 拒绝覆盖已有 id，重装失败时报「原安装已在重装开始时移除，重新执行安装即可恢复」，不留半成品规则不变）；**② 降级路径的指纹仍取扫描卡数据**（persona/skills 锚失配时落盘产物降级，但 manifest fingerprint 照算卡数据的 sha256——#6 的 updatable 比对双方都来自源扫描，若按实际落盘算，降级安装会永远显示 updatable；「指纹=落盘字段」的 #8 字面在降级路径上让位于此）；**③ 安装新增产物（skills 树、manifest）随 roster 收紧为 owner-only**（0o600/0o700，文件保留 owner-execute 位——roster 对 copy 产物本身就这么做，后加文件不得放宽该姿态）。另：skills 子目录的存在性以目录 stat 为准（空目录/纯 dotfile 目录照拷 #15，指纹行可以为空） | §4 |
+| 22 | zhName 优先级实证（T11/P4 实施新增） | **团队卡链调序为 frontmatter `profession.zh` ?? `displayName.zh`**（原 `displayName.zh` 优先）；**单体链维持** plugin.json `profession.zh` 首选。依据 `scripts/zhname-audit.mjs` 对真实语料的抽查（11/11 团队成员全量 + 10 张单体抽样）：团队成员卡 frontmatter `displayName.zh` **一律人名/花名**（高见远、贝洛奇、颜好看、大湾区靓仔、阿爆…），`profession.zh` **一律职能名**（首席架构师、后端工程师、UI/UX 设计师…），正文 H1 亦以「职能名 - 人名」为序——原链会让每张团队卡以人名示人；单体抽样 7/10 的 plugin.json `displayName.zh` 携品牌/人名（鹏城信息AI专家、火眼眼、运维通、严研行）而 `profession.zh` 为职能名，重申单体现行优先级正确。两类卡统一「职能名优先」口径；正文 H1 兜底链位不变（#19） | §2 `scripts/zhname-audit.mjs` |
 
 后续新议题在此追加，保持「议题 → 决策 → 落点」三列。

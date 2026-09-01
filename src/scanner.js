@@ -11,8 +11,14 @@
  *   id           ← frontmatter `name` (must pass ID_RE)
  *   name         ← frontmatter `displayName.en` ?? `name`          (base/en)
  *   zhName       ← single: plugin.json `profession.zh`
- *                → team card: frontmatter `displayName.zh` ?? `profession.zh`
- *                → frontmatter `displayName.zh` ?? `profession.zh` (any card)
+ *                → team card: frontmatter `profession.zh` ?? `displayName.zh`
+ *                  (decision #22, the P4 empirical audit: every sampled team
+ *                  member's displayName.zh is a person name while
+ *                  profession.zh is the functional name — the same shape the
+ *                  solo plugin.json fields show, so both classes put the
+ *                  functional name first)
+ *                → frontmatter `displayName.zh` ?? `profession.zh` (any card,
+ *                  as fallbacks after the class-specific sources above)
  *                → first body H1's functional name when it is Chinese
  *                (decision #19, see BODY-H1 EXTENSION below)
  *                → `name`
@@ -455,11 +461,15 @@ async function scanPluginDirectory(pluginDir) {
       if (!ID_RE.test(id)) throw new Error(`frontmatter name fails ${String(ID_RE)}: ${JSON.stringify(id)}`)
       const name = enOf(fields.displayName) || id
 
-      // zhName chain — plugin.json first for singles (#12), the agent
-      // frontmatter chain for team cards, the body-H1 extension (#19) last,
-      // and the card's English base name as the designed terminal fallback.
+      // zhName chain — the FUNCTIONAL name first for both classes (#22, the
+      // P4 empirical audit): solo cards lead with plugin.json profession.zh
+      // (#12), team cards with their own frontmatter profession.zh (the
+      // plugin.json one is team-level and identical for every member), each
+      // keeping the other displayName/profession fields as fallbacks, the
+      // body-H1 extension (#19) last, and the card's English base name as the
+      // designed terminal fallback.
       const zhNameCandidates = isTeam
-        ? [zhOf(fields.displayName), zhOf(fields.profession)]
+        ? [zhOf(fields.profession), zhOf(fields.displayName)]
         : [manifestProfessionZh, zhOf(fields.displayName), zhOf(fields.profession)]
       zhNameCandidates.push(bodyHeadingFunctionalName(body))
       const zhName = zhNameCandidates.find((candidate) => candidate !== '') ?? name

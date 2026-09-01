@@ -70,8 +70,18 @@
  *      path; a symlink where the platform has them) really resolve outside
  *      the source root — both escapes 404 while an innocent avatar in the
  *      same tree still serves byte-identical bytes;
- *   6. client bundle loads through a stub __ModuleLoader__ and mounts
- *      nothing (the market page is a later ticket);
+ *   6. client bundle (ticket #8) through a stub __ModuleLoader__ with a
+ *      functional document stub and a React stub whose useState actually
+ *      stores: bundle loads, settings.section registers (label/order/id),
+ *      the zh/en dictionaries stay key-aligned, the pure filter/search/
+ *      localization derivations hold (five chip states, cross-language
+ *      search where the base fields always hit, zh↔en name/description
+ *      chains), real component renders run (avatar img + onError → static
+ *      emoji with no second request, PNG-less card emoji, badges, tolerant
+ *      ✓/↑/⚠ marks, pathExists=false banner appearing and clearing,
+ *      collapsed-by-default warnings fold, locale-following cards), and
+ *      the apply disposer releases the slot entry AND the scoped style
+ *      tag (a re-apply after dispose re-injects idempotently);
  *   7. the schemastery resolver, when a real harness is present on this
  *      machine, hands back a usable factory (skipped silently otherwise —
  *      this section reports, it never gates).
@@ -100,6 +110,9 @@ assert.equal(pkg.dsh?.bundle?.patch, './cordis.patch.yml', 'bundle patch declare
 assert.equal(pkg.dsh?.client?.platform, 'web', 'client platform declared')
 assert.ok(Array.isArray(pkg.dsh.client.inject) && pkg.dsh.client.inject.length >= 1,
   'client inject declaration present')
+assert.ok(pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-locale') &&
+  pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings'),
+  'client inject composes the locale service and the settings.section declaring owner (ticket #8)')
 for (const [specifier, target] of Object.entries(pkg.exports)) {
   const path = join(root, target)
   assert.ok(readFileSync(path, 'utf8') !== undefined, `exports target exists: ${specifier} -> ${target}`)
@@ -1737,19 +1750,357 @@ rmSync(join(roster.dir), { recursive: true, force: true })
 rmSync(fixtureDir, { recursive: true, force: true })
 rmSync(fixtureRoot, { recursive: true, force: true })
 
-// ── 6. client bundle: loads through the stub loader, mounts nothing ─────────
+// ── 6. client bundle (ticket #8): load, register, render, dispose ───────────
+//
+// The stub module loader reprises the sister plugin's technique — a fake
+// __ModuleLoader__ captures the definition — with two upgrades this section
+// needs: the document stub is FUNCTIONAL (querySelector really finds the
+// injected style tags, tag.remove() really detaches them) so the disposer
+// assertions are honest, and the React stub's useState actually stores, so
+// driving onError and re-rendering runs real component logic rather than
+// first-paint shapes only.
 
 const clientCode = await readFile(join(root, 'client', 'client.js'), 'utf8')
 let loaded = null
 globalThis.window = { __ModuleLoader__: { load(def) { loaded = def } } }
+const styleTags = []
+globalThis.document = {
+  querySelector: (selector) => {
+    const match = /^style\[data-plugin-css="(.+)"\]$/.exec(selector)
+    if (match === null) return null
+    return styleTags.find((tag) => tag.dataset.pluginCss === match[1]) ?? null
+  },
+  createElement: () => ({
+    dataset: {},
+    textContent: '',
+    remove () {
+      const at = styleTags.indexOf(this)
+      if (at >= 0) styleTags.splice(at, 1)
+    },
+  }),
+  head: { appendChild: (tag) => styleTags.push(tag) },
+}
 ;(0, eval)(clientCode)
+
 assert.ok(loaded, '__ModuleLoader__.load received the definition')
 assert.equal(loaded.id, 'dsh-workbuddy-market')
-const clientModule = loaded.factory(() => { throw new Error('the skeleton requires no externals') })
+
+// React stub: createElement produces plain trees; useState stores per hook
+// slot so a later render of the same "mount" observes setter mutations.
+// resetMount() starts a fresh mount; render() just rewinds the hook cursor.
+let hookIndex = 0
+const hookStates = []
+const reactStub = {
+  createElement: (type, props, ...children) => ({ type, props, children }),
+  useState: (initial) => {
+    const at = hookIndex++
+    if (hookStates.length <= at) hookStates[at] = typeof initial === 'function' ? initial() : initial
+    return [hookStates[at], (next) => {
+      hookStates[at] = typeof next === 'function' ? next(hookStates[at]) : next
+    }]
+  },
+  useEffect: () => {},
+  useCallback: (fn) => fn,
+  useMemo: (fn) => fn(),
+  useRef: (value) => ({ current: value }),
+}
+const resetMount = () => { hookStates.length = 0 }
+const render = (component, props) => { hookIndex = 0; return component(props) }
+
+// Resolve function components in a freshly rendered tree ONCE, in tree
+// order — the same discipline React follows, so the cards' useState slots
+// line up behind the page's own hooks on the shared stub.
+function expandTree (node) {
+  if (Array.isArray(node)) return node.map(expandTree)
+  if (node === null || node === undefined) return node
+  if (typeof node === 'object' && typeof node.type !== 'undefined') {
+    if (typeof node.type === 'function') return expandTree(node.type(node.props))
+    return { ...node, children: expandTree(node.children) }
+  }
+  return node
+}
+
+const clientModule = loaded.factory((id) => {
+  if (id === 'react') return reactStub
+  throw new Error('unexpected require: ' + id)
+})
 assert.equal(clientModule.name, 'dsh-workbuddy-market')
-assert.deepEqual(clientModule.inject, [], 'no client service dependencies yet')
+assert.deepEqual(clientModule.inject, ['slots', 'locale'], 'services declared before property access')
 assert.equal(typeof clientModule.apply, 'function')
-assert.equal(typeof clientModule.apply({}), 'function', 'apply returns its disposer')
+assert.equal(styleTags.length, 0, 'the scoped style waits for apply (the disposer owns it)')
+
+// Dictionaries stay zh/en aligned, every market-page key present on both sides.
+assert.deepEqual(
+  Object.keys(clientModule.DICTS.zh).sort(),
+  Object.keys(clientModule.DICTS.en).sort(),
+  'zh/en key sets aligned',
+)
+for (const key of ['nav', 'title', 'subtitle', 'censusExperts', 'censusPlugins', 'search',
+  'filterAll', 'filterInstalled', 'filterUpdatable', 'filterSkills', 'filterTeam',
+  'matchesPlain', 'matchesEcho', 'emptyHint', 'emptyTip', 'clearFilters',
+  'bannerMissingPath', 'bannerMissingHint', 'warningsToggle', 'loadFailed', 'retry', 'busy',
+  'installedStamp', 'updatableStamp', 'brokenStamp', 'skillsBadge', 'teamBadge']) {
+  assert.ok(clientModule.DICTS.zh[key] !== undefined, `zh dict has ${key}`)
+  assert.ok(clientModule.DICTS.en[key] !== undefined, `en dict has ${key}`)
+}
+
+// Stub-tree walkers: every element node, and the concatenated text.
+function treeNodes (node) {
+  const out = []
+  const walk = (current) => {
+    if (Array.isArray(current)) { current.forEach(walk); return }
+    if (current === null || current === undefined) return
+    if (typeof current === 'object' && typeof current.type !== 'undefined') {
+      out.push(current)
+      walk(current.children)
+    }
+  }
+  walk(node)
+  return out
+}
+function treeText (node) {
+  let text = ''
+  const walk = (current) => {
+    if (Array.isArray(current)) { current.forEach(walk); return }
+    if (typeof current === 'string') { text += current; return }
+    if (typeof current === 'number') { text += String(current); return }
+    if (current !== null && typeof current === 'object' && typeof current.type !== 'undefined') {
+      walk(current.children)
+    }
+  }
+  walk(node)
+  return text
+}
+const interp = (template, params) =>
+  (params ? template.replace(/\{(\w+)\}/g, (m, k) => (params[k] !== undefined ? String(params[k]) : m)) : template)
+const tZh = (key, params) => interp(clientModule.DICTS.zh[key] ?? key, params)
+const tEn = (key, params) => interp(clientModule.DICTS.en[key] ?? key, params)
+
+// The fixture cards the derivations and renders run against.
+const cardAvatar = {
+  id: 'backend-architect', name: 'Backend Architect', zhName: '后端架构师',
+  description: 'Use when designing APIs.', zhDescription: '设计后端接口时使用。',
+  skills: [], pluginDir: 'backend-architect', teamSize: 1,
+  avatarUrl: '/dsh-workbuddy-market/api/avatar?id=backend-architect',
+}
+const cardTeam = {
+  id: 'team-lead', name: 'Team Lead', zhName: '队长',
+  description: 'Leads the team.', zhDescription: '带队交付。',
+  skills: ['main-skill', 'references'], pluginDir: 'mvp-dev-team', teamSize: 8,
+  installed: true, updatable: true,
+}
+const cardBroken = {
+  id: 'gone', name: 'Gone', zhName: '消失的', description: 'Manifest missing.', zhDescription: '清单缺失。',
+  skills: [], pluginDir: 'gone-plugin', teamSize: 1, broken: true,
+}
+const CARDS = [cardAvatar, cardTeam, cardBroken]
+const idsOf = (cards) => cards.map((card) => card.id)
+
+// Pure filter derivations: the five chip states.
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '')), ['backend-architect', 'team-lead', 'gone'])
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'installed', '')), ['team-lead'],
+  'installed chip filters on installed === true (absent fields simply never match)')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'updatable', '')), ['team-lead'])
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'skills', '')), ['team-lead'])
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'team', '')), ['team-lead'])
+
+// Bilingual search: zh hits zh fields, en hits base fields, and the BASE
+// fields stay in the haystack under every query (cross-language invariant).
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '后端')), ['backend-architect'],
+  'a Chinese query hits the zhName')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', 'architect')), ['backend-architect'],
+  'an English query hits the base name')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '设计后端')), ['backend-architect'],
+  'a Chinese query hits the zhDescription')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', 'manifest')), ['gone'],
+  'the BASE description always matches — even under a zh-shaped corpus entry')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'team', '带队')), ['team-lead'],
+  'query and chip filter compose')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', 'mvp-dev-team')), ['team-lead'],
+  'the source plugin dir is searchable')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', 'main-skill')), ['team-lead'],
+  'skill names are searchable')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '  GONE  ')), ['gone'],
+  'the query is trimmed and case-folded')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '不存在')),
+  [], 'a non-matching query yields nothing')
+
+// Localization chains: localized field first, base field as fallback.
+assert.equal(clientModule.localeNameOf(cardAvatar, 'zh'), '后端架构师')
+assert.equal(clientModule.localeNameOf(cardAvatar, 'en'), 'Backend Architect')
+assert.equal(clientModule.localeDescriptionOf(cardAvatar, 'zh'), '设计后端接口时使用。')
+assert.equal(clientModule.localeDescriptionOf(cardAvatar, 'en'), 'Use when designing APIs.')
+{
+  const enOnly = { ...cardAvatar, zhDescription: undefined }
+  assert.equal(clientModule.localeDescriptionOf(enOnly, 'zh'), 'Use when designing APIs.',
+    'a missing zhDescription falls back to the base description under zh')
+  const noZhName = { ...cardAvatar, zhName: undefined }
+  assert.equal(clientModule.localeNameOf(noZhName, 'zh'), 'Backend Architect',
+    'a missing zhName falls back to the base name under zh')
+}
+
+// Card renders — avatared card: a real <img> with the route URL and an
+// onError hook; zh locale names/descriptions; badges; NO status marks for a
+// card that carries no install state (the tolerant #8 contract).
+resetMount()
+let cardTree = render(clientModule.ExpertCard, { t: tZh, expert: cardAvatar, localeId: 'zh' })
+let imgNode = treeNodes(cardTree).find((node) => node.type === 'img')
+assert.ok(imgNode !== undefined, 'an avatared card renders an img')
+assert.equal(imgNode.props.src, cardAvatar.avatarUrl, 'the img src is the avatar route URL')
+assert.equal(typeof imgNode.props.onError, 'function', 'the img carries the onError hook')
+{
+  const text = treeText(cardTree)
+  assert.ok(text.includes('后端架构师'), 'zh card shows the zhName')
+  assert.ok(text.includes('设计后端接口时使用。'), 'zh card shows the zhDescription')
+  assert.ok(text.includes('backend-architect'), 'the source plugin dir badge is present')
+  assert.ok(!text.includes('技能'), 'a zero-skills card carries no skills badge')
+  assert.ok(!text.includes('团队'), 'a solo card carries no team badge')
+}
+assert.equal(treeNodes(cardTree).find((node) => node.props && node.props.className === 'wbm-status'),
+  undefined, 'a card without install-state fields shows NO status marks')
+
+// onError → the static emoji, and the img (its request) is gone entirely —
+// the fallback never issues a second network request.
+imgNode.props.onError()
+cardTree = render(clientModule.ExpertCard, { t: tZh, expert: cardAvatar, localeId: 'zh' })
+assert.equal(treeNodes(cardTree).find((node) => node.type === 'img'), undefined,
+  'after onError the img is unmounted (no placeholder request can follow)')
+assert.ok(treeText(cardTree).includes(clientModule.AVATAR_EMOJI), 'the static emoji takes over')
+assert.equal(clientModule.AVATAR_EMOJI, '🧑‍💻', 'the fallback is the designed static glyph')
+
+// A PNG-less card (scan found no avatar) starts at the emoji.
+resetMount()
+cardTree = render(clientModule.ExpertCard, { t: tZh, expert: { ...cardBroken, avatarUrl: undefined }, localeId: 'zh' })
+assert.equal(treeNodes(cardTree).find((node) => node.type === 'img'), undefined)
+assert.ok(treeText(cardTree).includes(clientModule.AVATAR_EMOJI))
+
+// Team card: skills + team badges and the tolerant ✓ / ↑ marks.
+resetMount()
+cardTree = render(clientModule.ExpertCard, { t: tZh, expert: cardTeam, localeId: 'zh' })
+{
+  const text = treeText(cardTree)
+  assert.ok(text.includes('技能 2'), 'skills badge counts the scan-card skills')
+  assert.ok(text.includes('团队 ·8'), 'team badge carries the team size')
+  assert.ok(text.includes('✓ 已装'), 'installed mark renders when the field is true')
+  assert.ok(text.includes('↑ 可更新'), 'updatable mark renders when the field is true')
+  assert.ok(!text.includes('⚠'), 'no broken mark without a broken field')
+}
+
+// Broken card: the ⚠ mark and nothing else.
+resetMount()
+cardTree = render(clientModule.ExpertCard, { t: tZh, expert: cardBroken, localeId: 'zh' })
+{
+  const text = treeText(cardTree)
+  assert.ok(text.includes('⚠ 预设损坏'), 'broken mark renders when the field is true')
+  assert.ok(!text.includes('✓'), 'no installed mark without the field')
+  assert.ok(!text.includes('↑'), 'no updatable mark without the field')
+}
+
+// The page over an injected snapshot (the initialState seam): the yellow
+// banner appears when pathExists=false and clears once the path is fixed;
+// warnings fold collapsed by default; census counts; cards render.
+const missingState = {
+  sourcePath: '/definitely/not/here', pathExists: false, revision: 3,
+  experts: CARDS, orphans: [], warnings: ['broken-one: plugin skipped (plugin.json corrupt)', 'another warning'],
+}
+resetMount()
+let pageTree = expandTree(render(clientModule.MarketPage, { t: tZh, getLocale: () => 'zh', initialState: missingState }))
+{
+  const nodes = treeNodes(pageTree)
+  const banner = nodes.find((node) => node.props && node.props.className === 'wbm-banner')
+  assert.ok(banner !== undefined, 'pathExists=false renders the yellow banner')
+  assert.equal(banner.props.role, 'alert', 'the banner is an alert')
+  const text = treeText(pageTree)
+  assert.ok(text.includes('源路径不存在：'), 'banner headline text')
+  assert.ok(text.includes('/definitely/not/here'), 'banner names the raw stored path')
+  assert.ok(text.includes('专家 3'), 'census counts the experts')
+  assert.ok(text.includes('来源插件 3'), 'census counts the source plugins')
+  assert.ok(text.includes('后端架构师') && text.includes('队长'), 'cards render from the snapshot')
+  assert.ok(text.includes('扫描警告 2 条'), 'the warnings fold announces its count')
+  assert.equal(nodes.find((node) => node.props && node.props.className === 'wbm-warns-list'), undefined,
+    'warnings are collapsed by default')
+}
+
+// Path fixed → the banner is gone from the very same page.
+resetMount()
+pageTree = expandTree(render(clientModule.MarketPage, {
+  t: tZh, getLocale: () => 'zh',
+  initialState: { ...missingState, sourcePath: '/now/it/exists', pathExists: true, warnings: [] },
+}))
+assert.equal(treeNodes(pageTree).find((node) => node.props && node.props.className === 'wbm-banner'),
+  undefined, 'a fixed path clears the banner')
+assert.equal(treeNodes(pageTree).find((node) => node.props && node.props.className === 'wbm-warns'),
+  undefined, 'no warnings fold without warnings')
+
+// Locale follow: the same snapshot under en shows base-field names and
+// descriptions (the dictionary-driven switch of the acceptance list).
+resetMount()
+pageTree = expandTree(render(clientModule.MarketPage, { t: tEn, getLocale: () => 'en', initialState: missingState }))
+{
+  const text = treeText(pageTree)
+  assert.ok(text.includes('WorkBuddy Expert Market'), 'en title from the dictionary')
+  assert.ok(text.includes('Backend Architect') && text.includes('Use when designing APIs.'),
+    'en cards show base-field names/descriptions')
+  assert.ok(!text.includes('后端架构师'), 'the zhName is not rendered under en')
+  assert.ok(text.includes('Source path does not exist:'), 'banner follows the language too')
+}
+
+// Empty source: the actionable empty state, not the banner's blame.
+resetMount()
+pageTree = expandTree(render(clientModule.MarketPage, {
+  t: tZh, getLocale: () => 'zh',
+  initialState: { sourcePath: '/empty/dir', pathExists: true, revision: 0, experts: [], orphans: [], warnings: [] },
+}))
+{
+  const text = treeText(pageTree)
+  assert.ok(text.includes('没有匹配的专家'), 'empty state headline')
+  assert.ok(text.includes('清除筛选'), 'empty state offers the clear-filters action')
+}
+
+// apply(): one settings.section entry, style owned by the disposer.
+const injectedSlots = []
+const slotEntries = []
+const slotsStub = {
+  inject(slot, register) {
+    injectedSlots.push(slot)
+    return register()
+  },
+  register(meta, renderer) {
+    const entry = { meta, renderer }
+    slotEntries.push(entry)
+    return () => {
+      const at = slotEntries.indexOf(entry)
+      if (at >= 0) slotEntries.splice(at, 1)
+    }
+  },
+}
+const offApply = clientModule.apply({ slots: slotsStub })
+assert.equal(typeof offApply, 'function', 'apply returns a disposer')
+assert.deepEqual(injectedSlots, ['settings.section'], 'the settings-section slot entry injected')
+assert.equal(styleTags.length, 1, 'the scoped style tag is injected alongside the registration')
+assert.equal(styleTags[0].dataset.plugin, 'dsh-workbuddy-market', 'the tag is plugin-owned')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-card'), 'CSS actually attached')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-banner'), 'banner CSS attached')
+
+const settingsEntry = slotEntries.find((entry) => entry.meta.name === 'settings.section')
+assert.equal(settingsEntry.meta.id, 'workbuddy-market')
+assert.equal(settingsEntry.meta.order, 46)
+assert.equal(settingsEntry.meta.label(), 'WorkBuddy 专家', 'zh nav label without the locale service')
+const pageElement = settingsEntry.renderer()
+assert.equal(typeof pageElement.type, 'function', 'render produces a MarketPage element')
+assert.equal(pageElement.props.getLocale(), 'zh', 'locale id threaded into the page (zh without the locale service)')
+
+// The disposer releases the slot entry AND the style tag; a re-apply after
+// disposal re-injects idempotently (same module instance, fresh fiber).
+offApply()
+assert.equal(slotEntries.length, 0, 'slot entries released by the apply disposer')
+assert.equal(styleTags.length, 0, 'scoped style tag removed by the apply disposer')
+const offAgain = clientModule.apply({ slots: slotsStub })
+assert.equal(styleTags.length, 1, 're-apply re-injects the style tag (single, not duplicated)')
+assert.equal(slotEntries.length, 1, 're-apply registers the slot entry again')
+offAgain()
+assert.equal(slotEntries.length, 0)
+assert.equal(styleTags.length, 0)
 
 // ── 7. schemastery resolver (reporting, never gating) ────────────────────────
 

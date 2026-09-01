@@ -2197,9 +2197,11 @@ globalThis.document = {
 assert.ok(loaded, '__ModuleLoader__.load received the definition')
 assert.equal(loaded.id, 'dsh-workbuddy-market')
 
-// React stub: createElement produces plain trees; useState stores per hook
-// slot so a later render of the same "mount" observes setter mutations.
-// resetMount() starts a fresh mount; render() just rewinds the hook cursor.
+// React stub: createElement produces plain trees; useState AND useRef store
+// per hook slot so a later render of the same "mount" observes setter
+// mutations AND a stable ref identity (a fresh object per render would break
+// exactly the async draft flows this section drives). resetMount() starts a
+// fresh mount; render() just rewinds the hook cursor.
 let hookIndex = 0
 const hookStates = []
 const reactStub = {
@@ -2214,7 +2216,11 @@ const reactStub = {
   useEffect: () => {},
   useCallback: (fn) => fn,
   useMemo: (fn) => fn(),
-  useRef: (value) => ({ current: value }),
+  useRef: (value) => {
+    const at = hookIndex++
+    if (hookStates.length <= at) hookStates[at] = { current: value }
+    return hookStates[at]
+  },
 }
 const resetMount = () => { hookStates.length = 0 }
 const render = (component, props) => { hookIndex = 0; return component(props) }
@@ -2251,7 +2257,15 @@ for (const key of ['nav', 'title', 'subtitle', 'censusExperts', 'censusPlugins',
   'filterAll', 'filterInstalled', 'filterUpdatable', 'filterSkills', 'filterTeam',
   'matchesPlain', 'matchesEcho', 'emptyHint', 'emptyTip', 'clearFilters',
   'bannerMissingPath', 'bannerMissingHint', 'warningsToggle', 'loadFailed', 'retry', 'busy',
-  'installedStamp', 'updatableStamp', 'brokenStamp', 'skillsBadge', 'teamBadge']) {
+  'installedStamp', 'updatableStamp', 'brokenStamp', 'skillsBadge', 'teamBadge',
+  // #9: the mutating half
+  'pathLabel', 'apply', 'applying', 'refreshBtn', 'pathApplied', 'configFailed', 'refreshFailed',
+  'conflictTitle', 'conflictDetail', 'conflictRetry', 'laneBusy',
+  'installBtn', 'updateBtn', 'uninstallBtn',
+  'confirmInstall', 'confirmUpdate', 'confirmUninstall', 'cancel', 'actionBusy',
+  'installDone', 'updateDone', 'uninstallDone',
+  'installFailed', 'updateFailed', 'uninstallFailed',
+  'orphansTitle', 'orphansHint', 'orphanBroken', 'orphanImported']) {
   assert.ok(clientModule.DICTS.zh[key] !== undefined, `zh dict has ${key}`)
   assert.ok(clientModule.DICTS.en[key] !== undefined, `en dict has ${key}`)
 }
@@ -2493,6 +2507,11 @@ assert.equal(styleTags.length, 1, 'the scoped style tag is injected alongside th
 assert.equal(styleTags[0].dataset.plugin, 'dsh-workbuddy-market', 'the tag is plugin-owned')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-card'), 'CSS actually attached')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-banner'), 'banner CSS attached')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-pathbar'), 'path topbar CSS attached')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-spin'), 'refresh spinner CSS attached')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-conflict'), 'revision conflict CSS attached')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-orphans'), 'orphans CSS attached')
+assert.ok(String(styleTags[0].textContent).includes('@keyframes wbm-spin'), 'the spin keyframes exist')
 
 const settingsEntry = slotEntries.find((entry) => entry.meta.name === 'settings.section')
 assert.equal(settingsEntry.meta.id, 'workbuddy-market')
@@ -2513,6 +2532,412 @@ assert.equal(slotEntries.length, 1, 're-apply registers the slot entry again')
 offAgain()
 assert.equal(slotEntries.length, 0)
 assert.equal(styleTags.length, 0)
+
+// ── 6b. the mutating half (ticket #9): state machines over the stub React ───
+//
+// The React stub's setters store, so driving real onClick/onChange handlers
+// and re-rendering runs the page's ACTUAL state machines: the inline
+// confirm → busy → notice flow of install/update/uninstall, the single-
+// flight 409 recovery, the revision-conflict box and its retry, the refresh
+// spinner's disabled window, and the orphans panel — with fetch scripted
+// per call so every request shape (method/body/expectedRevision) is
+// asserted, not assumed.
+
+const realFetch = globalThis.fetch
+const fetchLog = []
+let fetchScript = []
+const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve() }
+const gate = () => {
+  let resolve
+  const promise = new Promise((r) => { resolve = r })
+  return { promise, resolve }
+}
+// Scripted fetch: each entry is consumed in call order. A plain object is
+// answered immediately; a function returns the response promise itself
+// (pair with gate() to hold a flight open mid-assertion).
+globalThis.fetch = (path, init) => {
+  const entry = {
+    path: String(path),
+    method: (init && init.method) || 'GET',
+    body: init && typeof init.body === 'string' ? JSON.parse(init.body) : undefined,
+  }
+  fetchLog.push(entry)
+  const step = fetchScript.shift()
+  if (step === undefined) return Promise.reject(new Error('smoke: unexpected fetch ' + path))
+  if (typeof step === 'function') return step(entry)
+  return Promise.resolve({ ok: step.status < 400, status: step.status, json: async () => step.body })
+}
+const reply = (status, body) => () => Promise.resolve({ ok: status < 400, status, json: async () => body })
+const held = (status, body) => {
+  const g = gate()
+  fetchScript.push(() => g.promise.then(() => ({ ok: status < 400, status, json: async () => body })))
+  return g
+}
+
+const pageOf = (initialState) => ({ t: tZh, getLocale: () => 'zh', initialState })
+const drawPage = (props) => expandTree(render(clientModule.MarketPage, props))
+const buttonsOf = (tree) => treeNodes(tree).filter((node) => node.type === 'button')
+const buttonByExact = (tree, label) =>
+  buttonsOf(tree).find((node) => treeText(node).trim() === label)
+const noticeOf = (tree) => treeNodes(tree).find((node) =>
+  node.props && node.props.className === 'wbm-notice')
+const click = (tree, label) => {
+  const button = buttonByExact(tree, label)
+  assert.ok(button !== undefined, `button "${label}" present`)
+  assert.notEqual(button.props.disabled, true, `button "${label}" clickable`)
+  button.props.onClick()
+}
+
+// The experts every mutating scenario runs against (stable count/order so
+// the stub's hook slots line up across re-renders).
+const mutFresh = { id: 'backend-architect', name: 'Backend Architect', zhName: '后端架构师',
+  description: 'Use when designing APIs.', zhDescription: '设计后端接口时使用。',
+  skills: [], pluginDir: 'backend-architect', teamSize: 1, installed: false, updatable: false, broken: false }
+const mutOther = { ...mutFresh, id: 'dockerfile-gen', name: 'Dockerfile Gen', zhName: 'Dockerfile 生成',
+  pluginDir: 'dockerfile-gen', installed: false, updatable: false, broken: false }
+const mutState = (experts, rest = {}) => ({
+  sourcePath: '/old/source', pathExists: true, revision: 5, experts, orphans: [], warnings: [],
+  ...rest,
+})
+
+// cardActionsOf: the per-card action table driving the buttons.
+assert.deepEqual(clientModule.cardActionsOf({ installed: false }), ['install'])
+assert.deepEqual(clientModule.cardActionsOf({ installed: true }), ['uninstall'])
+assert.deepEqual(clientModule.cardActionsOf({ installed: true, updatable: true }), ['update', 'uninstall'])
+assert.deepEqual(clientModule.cardActionsOf({ installed: true, updatable: true, broken: true }), ['uninstall'],
+  'a broken card offers uninstall only — its fix is 卸载重装')
+
+// formatWhen: locale-aware import stamps, raw passthrough for junk.
+assert.ok(clientModule.formatWhen('2025-09-01T10:00:00.000Z', 'zh').includes('2025'))
+assert.ok(clientModule.formatWhen('2025-09-01T10:00:00.000Z', 'en').includes('2025'))
+assert.equal(clientModule.formatWhen('not-a-date', 'zh'), 'not-a-date')
+assert.equal(clientModule.formatWhen(undefined, 'zh'), '')
+
+// ── install state machine: 安装 → 确认安装？/取消 → confirm → busy → done ──
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const props = pageOf(mutState([mutFresh, mutOther]))
+  let tree = drawPage(props)
+  // Both uninstalled cards offer a primary 安装; nothing is busy yet.
+  let installs = buttonsOf(tree).filter((node) => treeText(node).trim() === '安装')
+  assert.equal(installs.length, 2, 'each uninstalled card carries an install button')
+  assert.equal(installs[0].props['data-variant'], 'primary', 'install is the primary action')
+  assert.notEqual(installs[0].props.disabled, true, 'idle lane leaves buttons enabled')
+
+  // Click 安装 → the row swaps to the confirm/cancel pair (sister pattern).
+  installs[0].props.onClick()
+  tree = drawPage(props)
+  assert.ok(buttonByExact(tree, '确认安装？') !== undefined, 'the inline confirm appears')
+  assert.ok(buttonByExact(tree, '取消') !== undefined, 'cancel joins the pair')
+  const actingCard = () => treeNodes(tree).filter((node) =>
+    node.props && node.props.className === 'wbm-card')[0]
+  assert.ok(buttonsOf(actingCard()).every((node) => treeText(node).trim() !== '安装'),
+    'the plain install button is gone from the confirming card')
+
+  // 取消 reverts to the plain button.
+  click(tree, '取消')
+  tree = drawPage(props)
+  assert.ok(buttonByExact(tree, '安装') !== undefined, 'cancel reverts the confirm pair')
+
+  // Confirm → busy window held open: this row shows 处理中…, the OTHER row
+  // disables, the POST body is exactly { id }.
+  const heldInstall = held(200, { ok: true, presetId: 'wb-backend-architect', warnings: ['w1'] })
+  fetchScript.push(reply(200, mutState([{ ...mutFresh, installed: true }, mutOther])))
+  click(tree, '安装')
+  click(drawPage(props), '确认安装？')
+  assert.equal(fetchLog[0].path, '/dsh-workbuddy-market/api/install', 'install posts to the lane route')
+  assert.equal(fetchLog[0].method, 'POST')
+  assert.deepEqual(fetchLog[0].body, { id: 'backend-architect' }, 'the install body is the expert id')
+  tree = drawPage(props)
+  assert.ok(buttonByExact(tree, '处理中…') !== undefined, 'the acting row shows the busy state')
+  assert.equal(buttonByExact(tree, '确认安装？'), undefined, 'the confirm pair stepped aside for busy')
+  const otherInstall = buttonsOf(tree).find((node) =>
+    treeText(node).trim() === '安装' && node.props.disabled === true)
+  assert.ok(otherInstall !== undefined, 'the sibling card disables while the lane is held')
+
+  // Release: notice ok (host warnings appended), state refetched, the card
+  // flips to ✓ 已装 with an 卸载 button.
+  heldInstall.resolve()
+  await flush()
+  tree = drawPage(props)
+  assert.equal(fetchLog[1].path, '/dsh-workbuddy-market/api/state', 'success refetches the state')
+  const notice = noticeOf(tree)
+  assert.ok(notice !== undefined && notice.props['data-kind'] === 'ok', 'an ok notice lands')
+  assert.ok(treeText(notice).includes('已安装「后端架构师」'), 'the notice names the expert')
+  assert.ok(treeText(notice).includes('（w1）'), 'host warnings ride the notice')
+  const cardText = treeText(treeNodes(tree).find((node) =>
+    node.props && node.props.className === 'wbm-card'))
+  assert.ok(cardText.includes('✓ 已装'), 'the card flips to installed')
+  assert.ok(buttonByExact(tree, '卸载') !== undefined, 'the installed card offers uninstall')
+  assert.ok(buttonByExact(tree, '安装') !== undefined, 'the other card stays installable')
+  assert.equal(buttonByExact(tree, '处理中…'), undefined, 'the busy state cleared')
+}
+
+// ── update: updatable → 更新 → confirm → updatable gone, content follows ────
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const updatable = { ...mutFresh, installed: true, updatable: true }
+  const props = pageOf(mutState([updatable, mutOther]))
+  let tree = drawPage(props)
+  assert.ok(buttonByExact(tree, '更新') !== undefined && buttonByExact(tree, '卸载') !== undefined,
+    'an updatable card offers update AND uninstall')
+  click(tree, '更新')
+  tree = drawPage(props)
+  assert.ok(buttonByExact(tree, '确认更新？') !== undefined, 'update confirms inline too')
+  fetchScript.push(reply(200, { ok: true, presetId: 'wb-backend-architect', warnings: [] }))
+  fetchScript.push(reply(200, mutState([{ ...mutFresh, installed: true, updatable: false }, mutOther])))
+  click(tree, '确认更新？')
+  await flush()
+  tree = drawPage(props)
+  assert.equal(fetchLog[0].path, '/dsh-workbuddy-market/api/update')
+  assert.deepEqual(fetchLog[0].body, { id: 'backend-architect' })
+  const notice = noticeOf(tree)
+  assert.ok(notice !== undefined && treeText(notice).includes('已更新「后端架构师」'), 'update notice')
+  const cardText = treeText(treeNodes(tree).find((node) =>
+    node.props && node.props.className === 'wbm-card'))
+  assert.ok(cardText.includes('✓ 已装'), 'still installed')
+  assert.ok(!cardText.includes('↑ 可更新'), 'the updatable mark is gone after the update')
+  assert.equal(buttonByExact(tree, '更新'), undefined, 'the update button left with the flag')
+}
+
+// ── uninstall: installed → 卸载 → danger confirm → back to uninstalled ──────
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const props = pageOf(mutState([{ ...mutFresh, installed: true }, mutOther]))
+  let tree = drawPage(props)
+  click(tree, '卸载')
+  tree = drawPage(props)
+  const confirmBtn = buttonByExact(tree, '确认卸载？')
+  assert.ok(confirmBtn !== undefined, 'uninstall confirms inline')
+  assert.equal(confirmBtn.props['data-variant'], 'danger', 'the destructive confirm is danger-toned')
+  fetchScript.push(reply(200, { ok: true, presetId: 'wb-backend-architect' }))
+  fetchScript.push(reply(200, mutState([mutFresh, mutOther])))
+  confirmBtn.props.onClick()
+  await flush()
+  tree = drawPage(props)
+  assert.equal(fetchLog[0].path, '/dsh-workbuddy-market/api/uninstall')
+  assert.deepEqual(fetchLog[0].body, { id: 'backend-architect' })
+  const notice = noticeOf(tree)
+  assert.ok(notice !== undefined && treeText(notice).includes('已卸载「后端架构师」'), 'uninstall notice')
+  const cardText = treeText(treeNodes(tree).find((node) =>
+    node.props && node.props.className === 'wbm-card'))
+  assert.ok(!cardText.includes('✓ 已装'), 'the installed mark cleared')
+  assert.ok(buttonByExact(tree, '安装') !== undefined, 'the card is installable again')
+}
+
+// ── single-flight 409: UI does not wedge, buttons recover and retry works ──
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const props = pageOf(mutState([mutFresh, mutOther]))
+  let tree = drawPage(props)
+  click(tree, '安装')
+  tree = drawPage(props)
+  fetchScript.push(reply(409, { error: 'another change is in progress' }))
+  click(tree, '确认安装？')
+  await flush()
+  tree = drawPage(props)
+  assert.equal(fetchLog.length, 1, 'a failed install does not refetch state')
+  const notice = noticeOf(tree)
+  assert.ok(notice !== undefined && notice.props['data-kind'] === 'error', 'the 409 lands as an error notice')
+  assert.ok(treeText(notice).includes('另一个变更正在进行'), 'the localized lane hint appears')
+  assert.ok(treeText(notice).includes('another change is in progress'), 'the host message rides along')
+  assert.equal(buttonByExact(tree, '处理中…'), undefined, 'no busy state survives the 409')
+  const retryInstall = buttonByExact(tree, '安装')
+  assert.ok(retryInstall !== undefined && retryInstall.props.disabled !== true,
+    'the install button is usable again right after the 409')
+  // And the retry can succeed on the same page state.
+  click(tree, '安装')
+  tree = drawPage(props)
+  fetchScript.push(reply(200, { ok: true, presetId: 'wb-backend-architect' }))
+  fetchScript.push(reply(200, mutState([{ ...mutFresh, installed: true }, mutOther])))
+  click(tree, '确认安装？')
+  await flush()
+  tree = drawPage(props)
+  assert.ok(treeText(drawPage(props)).includes('✓ 已装'), 'the retried install succeeds')
+}
+
+// ── path editor: revision conflict box, retry success, banner recovery ─────
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const props = pageOf(mutState([mutFresh]))
+  let tree = drawPage(props)
+  const pathInput = treeNodes(tree).find((node) =>
+    node.props && node.props.className === 'wbm-path-input')
+  assert.ok(pathInput !== undefined, 'the path topbar renders an input')
+  assert.equal(pathInput.props.value, '/old/source', 'the draft starts at the stored path')
+  let applyBtn = buttonByExact(tree, '应用')
+  assert.equal(applyBtn.props.disabled, true, 'apply is disabled while the draft is unchanged')
+
+  // Edit the draft; apply fires the optimistic-locked config POST.
+  pathInput.props.onChange({ target: { value: '/new/fixture' } })
+  tree = drawPage(props)
+  assert.equal(treeNodes(tree).find((node) =>
+    node.props && node.props.className === 'wbm-path-input').props.value, '/new/fixture')
+  applyBtn = buttonByExact(tree, '应用')
+  assert.notEqual(applyBtn.props.disabled, true, 'editing the draft enables apply')
+
+  // Empty draft disables apply again (the raw value, not the trimmed one).
+  treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-path-input')
+    .props.onChange({ target: { value: '   ' } })
+  assert.equal(buttonByExact(drawPage(props), '应用').props.disabled, true, 'a blank draft disables apply')
+  // Fresh mount for the conflict flow.
+  resetMount()
+  fetchLog.length = 0
+  fetchScript = []
+  const props2 = pageOf(mutState([mutFresh]))
+  let tree2 = drawPage(props2)
+  treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-path-input')
+    .props.onChange({ target: { value: '/new/fixture' } })
+
+  // Another tab got there first: 409 SETTINGS_CONFLICT carrying both sides.
+  fetchScript.push(reply(409, {
+    error: 'settings conflict', code: 'SETTINGS_CONFLICT', expectedRevision: 5, revision: 9,
+  }))
+  click(drawPage(props2), '应用')
+  await flush()
+  tree2 = drawPage(props2)
+  const conflict = treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-conflict')
+  assert.ok(conflict !== undefined, 'the conflict box renders on SETTINGS_CONFLICT')
+  assert.equal(conflict.props.role, 'alert', 'the conflict box is an alert')
+  const conflictText = treeText(conflict)
+  assert.ok(conflictText.includes('设置冲突'), 'conflict headline')
+  assert.ok(conflictText.includes('本页基于修订 5'), 'our expected revision is shown')
+  assert.ok(conflictText.includes('当前已是修订 9'), 'the current revision is shown')
+  assert.deepEqual(fetchLog[0].body, { sourcePath: '/new/fixture', expectedRevision: 5 },
+    'the config POST carries the optimistic lock')
+
+  // Retry: pull the fresh state (revision 9), replay the same draft, land.
+  fetchScript.push(reply(200, mutState([mutFresh], { revision: 9 })))
+  fetchScript.push(reply(200, mutState([mutFresh], { sourcePath: '/new/fixture', pathExists: false, revision: 10, warnings: ['source path does not exist: /new/fixture'] })))
+  click(tree2, '拉取新修订并重试')
+  await flush()
+  tree2 = drawPage(props2)
+  assert.equal(fetchLog[1].path, '/dsh-workbuddy-market/api/state', 'retry re-pulls the state first')
+  assert.deepEqual(fetchLog[2].body, { sourcePath: '/new/fixture', expectedRevision: 9 },
+    'retry replays the draft against the FRESH revision')
+  assert.equal(treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-conflict'),
+    undefined, 'the conflict box clears on retry success')
+  const notice = noticeOf(tree2)
+  assert.ok(notice !== undefined && treeText(notice).includes('源路径已更新：/new/fixture'), 'apply notice')
+  const banner = treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-banner')
+  assert.ok(banner !== undefined, 'a nonexistent applied path raises the yellow banner')
+  assert.ok(treeText(banner).includes('/new/fixture'), 'the banner names the applied path')
+  assert.equal(treeNodes(tree2).find((node) =>
+    node.props && node.props.className === 'wbm-path-input').props.value, '/new/fixture',
+    'the draft follows the applied path')
+
+  // Fix the path: banner clears (改对 → 自动恢复).
+  fetchScript.push(reply(200, mutState([mutFresh], { sourcePath: '/fixed', pathExists: true, revision: 11 })))
+  treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-path-input')
+    .props.onChange({ target: { value: '/fixed' } })
+  click(drawPage(props2), '应用')
+  await flush()
+  tree2 = drawPage(props2)
+  assert.equal(treeNodes(tree2).find((node) => node.props && node.props.className === 'wbm-banner'),
+    undefined, 'fixing the path clears the banner')
+}
+
+// ── refresh: the spinner's disabled window + the forced rescan ─────────────
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const props = pageOf(mutState([mutFresh]))
+  let tree = drawPage(props)
+  const refreshBtn = treeNodes(tree).find((node) =>
+    node.props && node.props.className && node.props.className.indexOf('wbm-refresh') !== -1)
+  assert.ok(refreshBtn !== undefined, 'the refresh button renders')
+  assert.notEqual(refreshBtn.props.disabled, true, 'idle refresh is enabled')
+
+  // Hold the rescan open: disabled + aria-busy + the spinning icon class.
+  const heldRefresh = held(200, mutState([mutFresh, mutOther], { revision: 6 }))
+  refreshBtn.props.onClick()
+  assert.equal(fetchLog[0].path, '/dsh-workbuddy-market/api/refresh')
+  assert.equal(fetchLog[0].method, 'POST')
+  tree = drawPage(props)
+  const spinning = treeNodes(tree).find((node) =>
+    node.props && node.props.className && node.props.className.indexOf('wbm-refresh') !== -1)
+  assert.equal(spinning.props.disabled, true, 'the refresh button disables during its flight')
+  assert.equal(spinning.props['aria-busy'], 'true', 'the flight is announced')
+  assert.ok(treeNodes(tree).some((node) =>
+    node.props && node.props.className === 'wbm-spin'), 'the icon spins while held')
+  assert.equal(buttonByExact(tree, '应用').props.disabled, true, 'apply also waits out the lane')
+  assert.equal(buttonByExact(tree, '安装').props.disabled, true,
+    'card action buttons wait out a refresh flight too (shared lane)')
+  assert.equal(buttonByExact(tree, '刷新') !== undefined && buttonByExact(tree, '刷新').props.disabled, true,
+    'the refresh button itself stays disabled while held')
+
+  // Release: button back, spinner gone, the fresh state lands.
+  heldRefresh.resolve()
+  await flush()
+  tree = drawPage(props)
+  const done = treeNodes(tree).find((node) =>
+    node.props && node.props.className && node.props.className.indexOf('wbm-refresh') !== -1)
+  assert.notEqual(done.props.disabled, true, 'refresh re-enables after the flight')
+  assert.notEqual(done.props['aria-busy'], 'true', 'aria-busy clears')
+  assert.ok(!treeNodes(tree).some((node) => node.props && node.props.className === 'wbm-spin'),
+    'the spinner stops')
+  assert.ok(treeText(tree).includes('专家 2'), 'the forced rescan state landed')
+}
+
+// ── orphans: provenance rows with confirmed uninstall by id ────────────────
+{
+  fetchLog.length = 0
+  fetchScript = []
+  resetMount()
+  const orphanLeft = { id: 'lefty', presetId: 'wb-lefty', name: 'Lefty',
+    sourcePath: '/other/source', pluginDir: 'other-plugin', agentFile: 'agents/lefty.md',
+    importedAt: '2025-09-01T10:00:00.000Z', broken: false }
+  const orphanDead = { id: 'dead', presetId: 'wb-dead', name: 'Dead', broken: true,
+    warning: '清单缺失，请卸载重装：/presets/wb-dead/.workbuddy-market.json file missing' }
+  const props = pageOf(mutState([mutFresh], { orphans: [orphanLeft, orphanDead] }))
+  let tree = drawPage(props)
+  const panel = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-orphans')
+  assert.ok(panel !== undefined, 'the orphans panel renders')
+  const panelText = treeText(panel)
+  assert.ok(panelText.includes('已安装但不在当前源'), 'panel title')
+  assert.ok(panelText.includes('2'), 'panel count')
+  assert.ok(panelText.includes('Lefty') && panelText.includes('wb-lefty'), 'name + preset id')
+  assert.ok(panelText.includes('/other/source'), 'provenance carries the old source path')
+  assert.ok(panelText.includes('other-plugin/agents/lefty.md'), 'provenance carries plugin dir + agent file')
+  assert.ok(panelText.includes('安装于') && panelText.includes('2025'), 'the import stamp is localized')
+  assert.ok(panelText.includes('清单异常'), 'a broken orphan is flagged')
+  assert.ok(panelText.includes('清单缺失，请卸载重装'), 'the broken orphan surfaces its host warning as provenance')
+  const orphanRows = treeNodes(panel).filter((node) =>
+    node.props && node.props.className === 'wbm-orphan')
+  assert.equal(orphanRows.length, 2, 'one row per orphan')
+  assert.equal(orphanRows[1].props['data-broken'], 'true', 'the broken row is marked')
+
+  // Uninstall the healthy orphan through the same confirm machine.
+  const orphanUninstall = buttonsOf(orphanRows[0]).find((node) => treeText(node).trim() === '卸载')
+  assert.ok(orphanUninstall !== undefined, 'an orphan row carries an uninstall button')
+  orphanUninstall.props.onClick()
+  tree = drawPage(props)
+  assert.ok(buttonByExact(tree, '确认卸载？') !== undefined, 'orphan uninstall confirms inline')
+  fetchScript.push(reply(200, { ok: true, presetId: 'wb-lefty' }))
+  fetchScript.push(reply(200, mutState([mutFresh], { orphans: [orphanDead] })))
+  click(tree, '确认卸载？')
+  await flush()
+  tree = drawPage(props)
+  assert.equal(fetchLog[0].path, '/dsh-workbuddy-market/api/uninstall')
+  assert.deepEqual(fetchLog[0].body, { id: 'lefty' }, 'orphan uninstall posts the expert id (roster authority)')
+  const panelAfter = treeNodes(tree).find((node) => node.props && node.props.className === 'wbm-orphans')
+  assert.ok(treeText(panelAfter).includes('Dead'), 'the remaining orphan stays')
+  assert.ok(!treeText(panelAfter).includes('wb-lefty'), 'the uninstalled orphan left the panel')
+}
+
+globalThis.fetch = realFetch
+
 
 // ── 8. summon tools (ticket #10) against mocked tools/subagents seams ───────
 //

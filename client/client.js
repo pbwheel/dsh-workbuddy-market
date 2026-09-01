@@ -1,43 +1,48 @@
 /**
- * dsh-workbuddy-market browser client (ticket #8): the READ-ONLY market page,
- * hand-written in the harness client-bundle format: `window.__ModuleLoader__
- * .load({ id, factory })`, CJS-style module, externals resolved through the
- * injected `require` (react only). There is no build step — this file IS the
+ * dsh-workbuddy-market browser client: the market page, hand-written in the
+ * harness client-bundle format: `window.__ModuleLoader__.load({ id,
+ * factory })`, CJS-style module, externals resolved through the injected
+ * `require` (react only). There is no build step — this file IS the
  * artifact package.json exports as "./client". The wrapper shape, the
  * settings.section registration, the theme-token CSS with hard fallbacks,
  * and the zh/en dictionaries all mirror the sister plugin's verified bundle
  * (dsh-agency-market/client/client.js) verbatim where the two pages overlap.
  *
- * It registers exactly one client surface:
- *   - one `settings.section` entry ("WorkBuddy 专家"): the read-only half of
- *     the market — a yellow banner when the source path does not exist
- *     (pathExists=false), a census line (experts / source plugins), full-width
- *     bilingual search (the base English fields are always in the haystack,
- *     so a query hits in either UI language), five single-select filter
- *     chips (all / installed / updatable / with-skills / team) with live
- *     counts, a collapsed-by-default scan-warnings fold, and a card grid.
- *     Each card carries the expert's PNG avatar (onError swaps to a static
- *     🧑‍💻 emoji — no placeholder request ever), a name + description that
- *     follow the UI language (zhName/zhDescription vs the base fields),
- *     provenance badges (source plugin dir, skills count, team size), and
- *     status marks rendered TOLERANTLY — ✓ installed / ↑ updatable / ⚠
- *     broken appear only when the state payload carries the field; the
- *     read-only page neither requires nor fabricates them.
+ * Ticket #8 shipped the read-only half; ticket #9 (this file's current
+ * shape) adds the MUTATING half on the same page:
  *
- * Deliberately NOT here (later tickets): the source-path editor and refresh
- * button (#9, the mutating half — this page pulls /api/state exactly once
- * per mount; the payload is bilingual so a locale switch re-renders without
- * refetching), install/update/uninstall actions (#9), and the summon entry
- * points (#10).
+ *   - the source-path topbar: a mono path input + 应用 (apply) + a refresh
+ *     button whose icon SPINS while the rescan runs and is disabled for the
+ *     whole flight (no double submits). Apply posts { sourcePath,
+ *     expectedRevision } — the revision is the settings namespace's
+ *     optimistic lock, so a second tab's change answers 409
+ *     SETTINGS_CONFLICT, which renders BOTH revisions in a warn box with a
+ *     重试 button that re-pulls the fresh revision and replays the same
+ *     draft. Saving a nonexistent path is allowed (design #3): the page
+ *     answers with the yellow banner, and fixing the path clears it on the
+ *     next apply — 改错 → 黄条, 改对 → 自动恢复;
+ *   - inline install/update/uninstall on every card, ALL behind the
+ *     sister's inline confirmation: the action button swaps for a
+ *     confirm/cancel pair that auto-reverts after 4 seconds. One lane at a
+ *     time client-side too — while any row action is in flight that row
+ *     shows a disabled 处理中… and every other mutating control disables —
+ *     so the host's single-flight 409 (a second tab racing us) lands in a
+ *     handler that surfaces it as an error notice and always releases the
+ *     busy state: the UI never wedges, every button comes back;
+ *   - every action refetches /api/state on success (the response's fresh
+ *     overlay flips ✓ 已装 / ↑ 可更新 within a second of the click), and
+ *     the orphans panel lists wb-* presets installed from another source
+ *     with full provenance (preset id, source path, plugin dir/agent file,
+ *     import date, broken flag) and its own confirmed uninstall — the
+ *     roster, not the scan table, is the uninstall authority.
  *
- * One intentional deviation from the sister, required by this ticket's
- * acceptance ("disposer clears the slot AND the style"): the scoped
- * <style data-plugin> tag is injected inside apply() and removed by the
- * disposer apply() returns, so the cleanup is owned by this fiber rather
- * than delegated to the module loader. The tag keeps the same
- * data-plugin / data-plugin-css attributes, the loader's own unload-time
- * sweep stays a harmless second line of defense, and a re-apply after a
- * dispose re-injects idempotently through the querySelector guard.
+ * Deliberately NOT here (later tickets): the summon entry points (#10's
+ * button, #11's @ trigger).
+ *
+ * One intentional deviation from the sister, kept from ticket #8: the
+ * scoped <style data-plugin> tag is injected inside apply() and removed by
+ * the disposer apply() returns, so the cleanup is owned by this fiber
+ * rather than delegated to the module loader.
  */
 window.__ModuleLoader__.load({ id: "dsh-workbuddy-market", factory: (require) => {
 var module = { exports: {} }; var exports = module.exports;
@@ -45,8 +50,8 @@ var module = { exports: {} }; var exports = module.exports;
 var NS = 'dsh-workbuddy-market'
 var API_BASE = '/dsh-workbuddy-market/api'
 
-// The directory's second voice: ids, plugin dirs, counts, and the census run
-// in mono.
+// The directory's second voice: ids, plugin dirs, counts, paths, and the
+// census run in mono.
 var MONO = 'var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)'
 
 // The static avatar fallback — a plain glyph, never a network request.
@@ -73,6 +78,29 @@ var CSS = `
   font-family: ${MONO}; font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums;
   color: var(--dsw-alias-label-tertiary, inherit); white-space: nowrap; }
 .wbm-census-item { border-radius: 4px; padding: 0 2px; }
+
+/* ── the mutating topbar: source path input + apply + refresh (#9) ───────── */
+.wbm-pathbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.wbm-path-field { flex: 1 1 240px; min-width: 0; }
+.wbm-path-input { width: 100%; box-sizing: border-box; padding: 7px 10px; font-size: 12px; border-radius: 8px;
+  font-family: ${MONO};
+  border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.35)); outline: none;
+  background: var(--dsw-alias-bg-layer-1, transparent); color: var(--dsw-alias-label-primary, inherit); }
+.wbm-path-input:focus { border-color: var(--dsw-alias-brand-primary, currentColor); }
+.wbm-path-input::placeholder { color: var(--dsw-alias-label-tertiary, inherit); }
+.wbm-refresh { display: inline-flex; align-items: center; gap: 5px; }
+.wbm-spin { animation: wbm-spin .9s linear infinite; }
+@keyframes wbm-spin { to { transform: rotate(360deg); } }
+
+/* ── the revision conflict box: both sides' revisions + retry (#9) ───────── */
+.wbm-conflict { display: flex; gap: 6px 10px; flex-wrap: wrap; align-items: center;
+  padding: 9px 12px; font-size: 12px; line-height: 1.6; border-radius: 10px;
+  color: var(--dsw-alias-state-warn-primary, #c77700);
+  background: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #c77700) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #c77700) 42%, transparent); }
+.wbm-conflict-body { flex: 1 1 240px; min-width: 0; }
+.wbm-conflict-title { display: block; font-weight: 600; }
+.wbm-conflict-detail { display: block; font-family: ${MONO}; font-size: 11px; }
 
 /* ── search owns its row — the primary path through a 50-card corpus ─────── */
 .wbm-search { width: 100%; box-sizing: border-box; padding: 9px 12px; font-size: 13px; border-radius: 10px;
@@ -140,12 +168,38 @@ var CSS = `
 .wbm-badge[data-kind="plugin"] { font-family: ${MONO}; font-size: 10px; }
 .wbm-badge[data-kind="team"] { color: var(--dsw-alias-brand-primary, #4f6ef7);
   border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #4f6ef7) 40%, transparent); }
-.wbm-status { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-top: auto; padding-top: 2px;
+
+/* ── the card footer: status marks over the inline action row (#9) ───────── */
+.wbm-foot { margin-top: auto; padding-top: 7px; display: flex; flex-direction: column; gap: 6px;
   border-top: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.18)); }
+.wbm-status { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
 .wbm-mark { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; white-space: nowrap; }
 .wbm-mark[data-kind="ok"] { color: var(--dsw-alias-state-success-primary, #2e9e5b); }
 .wbm-mark[data-kind="upd"] { color: var(--dsw-alias-brand-primary, #4f6ef7); }
 .wbm-mark[data-kind="bad"] { color: var(--dsw-alias-state-warn-primary, #c77700); }
+.wbm-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+/* ── the orphans panel: installed from another source (#9) ───────────────── */
+.wbm-orphans { border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.28)); border-radius: 12px;
+  padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.wbm-orphans-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.wbm-orphans-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary, inherit); }
+.wbm-orphans-count { font-family: ${MONO}; font-size: 11px; line-height: 1.4;
+  font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, inherit); }
+.wbm-orphans-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-tertiary, inherit); }
+.wbm-orphan { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  padding: 8px 10px; border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.22)); border-radius: 10px; }
+.wbm-orphan[data-broken="true"] { border-color: color-mix(in srgb, var(--dsw-alias-state-warn-primary, #c77700) 45%, transparent); }
+.wbm-orphan-main { min-width: 0; flex: 1 1 260px; display: flex; flex-direction: column; gap: 2px; }
+.wbm-orphan-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.wbm-orphan-name { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary, inherit); }
+.wbm-orphan-id { font-family: ${MONO}; font-size: 11px; line-height: 1.4;
+  color: var(--dsw-alias-label-tertiary, inherit); word-break: break-all; }
+.wbm-orphan-broken { flex: none; font-size: 10px; line-height: 1.5; padding: 1px 7px; border-radius: 999px; white-space: nowrap;
+  color: var(--dsw-alias-state-warn-primary, #c77700);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-primary, #c77700) 45%, transparent); }
+.wbm-orphan-meta { font-family: ${MONO}; font-size: 11px; line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary, inherit); overflow-wrap: anywhere; }
 
 /* ── states: skeleton loading, actionable empty, error + retry ───────────── */
 .wbm-skel { display: grid; grid-template-columns: repeat(auto-fill, minmax(232px, 1fr)); gap: 10px; }
@@ -159,19 +213,29 @@ var CSS = `
 .wbm-empty-tip { margin: 0; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-tertiary, inherit); }
 .wbm-notice { padding: 8px 12px; font-size: 12px; line-height: 1.6; border-radius: 8px;
   border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3)); }
+.wbm-notice[data-kind="ok"] { color: var(--dsw-alias-state-success-primary, #2e9e5b); }
 .wbm-notice[data-kind="error"] { color: var(--dsw-alias-state-error-primary, #d5484f); }
 .wbm-btn { padding: 5px 12px; font-size: 12px; border-radius: 8px; cursor: pointer;
   border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.35)); background: transparent;
   color: var(--dsw-alias-label-primary, inherit); }
 .wbm-btn:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.1)); }
+.wbm-btn:disabled { opacity: .55; cursor: default; }
+.wbm-btn[data-variant="primary"] { background: var(--dsw-alias-brand-primary, #4f6ef7); border-color: transparent; color: #fff; }
+.wbm-btn[data-variant="primary"]:hover:not(:disabled) { background: var(--dsw-alias-brand-primary, #4f6ef7); opacity: .9; }
+.wbm-btn[data-variant="danger"] { color: var(--dsw-alias-state-error-primary, #d5484f);
+  border-color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d5484f) 45%, transparent); }
+.wbm-btn[data-variant="danger"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--dsw-alias-state-error-primary, #d5484f) 10%, transparent); }
 .wbm-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 
 /* ── quality floor: visible keyboard focus, calm motion ──────────────────── */
-.wbm-btn:focus-visible, .wbm-chip:focus-visible, .wbm-search:focus-visible, .wbm-warns-toggle:focus-visible {
+.wbm-btn:focus-visible, .wbm-chip:focus-visible, .wbm-search:focus-visible, .wbm-path-input:focus-visible,
+.wbm-warns-toggle:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary, currentColor); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) {
   .wbm-skel-card { animation: none; }
+  .wbm-spin { animation: none; }
 }
 `
 
@@ -205,7 +269,7 @@ var DICTS = {
   zh: {
     nav: 'WorkBuddy 专家',
     title: 'WorkBuddy 专家市场',
-    subtitle: '本地 WorkBuddy 目录扫描出的专家一览（只读）。',
+    subtitle: '浏览本地 WorkBuddy 专家，装为用户预设；目录变了就刷新或改路径。',
     censusExperts: '专家 {n}',
     censusPlugins: '来源插件 {n}',
     search: '搜索名称、描述或 id —— 中英文都行',
@@ -229,12 +293,42 @@ var DICTS = {
     updatableStamp: '可更新',
     brokenStamp: '预设损坏',
     skillsBadge: '技能 {n}',
-    teamBadge: '团队 ·{n}'
+    teamBadge: '团队 ·{n}',
+    // ── #9: the mutating half ──────────────────────────────────────────────
+    pathLabel: '源路径',
+    apply: '应用',
+    applying: '应用中…',
+    refreshBtn: '刷新',
+    pathApplied: '源路径已更新：{path}',
+    configFailed: '路径保存失败',
+    refreshFailed: '刷新失败',
+    conflictTitle: '设置冲突：源路径已被其他页面修改。',
+    conflictDetail: '本页基于修订 {expected}，当前已是修订 {actual}。',
+    conflictRetry: '拉取新修订并重试',
+    laneBusy: '另一个变更正在进行，请稍后重试',
+    installBtn: '安装',
+    updateBtn: '更新',
+    uninstallBtn: '卸载',
+    confirmInstall: '确认安装？',
+    confirmUpdate: '确认更新？',
+    confirmUninstall: '确认卸载？',
+    cancel: '取消',
+    actionBusy: '处理中…',
+    installDone: '已安装「{name}」',
+    updateDone: '已更新「{name}」',
+    uninstallDone: '已卸载「{name}」',
+    installFailed: '安装失败',
+    updateFailed: '更新失败',
+    uninstallFailed: '卸载失败',
+    orphansTitle: '已安装但不在当前源',
+    orphansHint: '这些 preset 装自别的源目录（或其专家已不在当前源中）——只呈列，不自动卸载；确认后可按 id 卸载。',
+    orphanBroken: '清单异常',
+    orphanImported: '安装于 {when}'
   },
   en: {
     nav: 'WorkBuddy Experts',
     title: 'WorkBuddy Expert Market',
-    subtitle: 'A read-only view of experts scanned from your local WorkBuddy directory.',
+    subtitle: 'Browse local WorkBuddy experts and install them as user presets; refresh or repoint the path when the directory moves.',
     censusExperts: '{n} experts',
     censusPlugins: '{n} plugins',
     search: 'Search names, descriptions, or ids — both languages',
@@ -258,7 +352,37 @@ var DICTS = {
     updatableStamp: 'updatable',
     brokenStamp: 'preset broken',
     skillsBadge: '{n} skills',
-    teamBadge: 'team ·{n}'
+    teamBadge: 'team ·{n}',
+    // ── #9: the mutating half ──────────────────────────────────────────────
+    pathLabel: 'Source path',
+    apply: 'Apply',
+    applying: 'Applying…',
+    refreshBtn: 'Refresh',
+    pathApplied: 'Source path updated: {path}',
+    configFailed: 'Failed to save the path',
+    refreshFailed: 'Refresh failed',
+    conflictTitle: 'Settings conflict: the source path was changed on another page.',
+    conflictDetail: 'This page was on revision {expected}; the current revision is {actual}.',
+    conflictRetry: 'Pull the new revision and retry',
+    laneBusy: 'Another change is in progress — try again shortly',
+    installBtn: 'Install',
+    updateBtn: 'Update',
+    uninstallBtn: 'Uninstall',
+    confirmInstall: 'Install now?',
+    confirmUpdate: 'Update now?',
+    confirmUninstall: 'Uninstall now?',
+    cancel: 'Cancel',
+    actionBusy: 'Working…',
+    installDone: 'Installed "{name}"',
+    updateDone: 'Updated "{name}"',
+    uninstallDone: 'Uninstalled "{name}"',
+    installFailed: 'Install failed',
+    updateFailed: 'Update failed',
+    uninstallFailed: 'Uninstall failed',
+    orphansTitle: 'Installed from another source',
+    orphansHint: 'These presets came from another source directory (or their expert left this one) — listed, never auto-uninstalled; confirm to uninstall by id.',
+    orphanBroken: 'manifest broken',
+    orphanImported: 'installed {when}'
   }
 }
 
@@ -275,14 +399,37 @@ function interpolate (template, params) {
   })
 }
 
-/** Same-origin JSON fetch; throws host-sent error messages when present. */
+/**
+ * Same-origin JSON fetch; throws host-sent error messages when present.
+ * Thrown errors carry the HTTP status and, when the host sent them, the
+ * structured fields the #9 flows key off: `code` (SETTINGS_CONFLICT) and
+ * the two revisions of a config conflict.
+ */
 function api (path, options) {
   var init = Object.assign({ credentials: 'same-origin' }, options || {})
   return fetch(path, init).then(function (response) {
     return response.json().catch(function () { return {} }).then(function (body) {
-      if (!response.ok) throw new Error(body && body.error ? body.error : 'HTTP ' + response.status)
+      if (!response.ok) {
+        var error = new Error(body && body.error ? body.error : 'HTTP ' + response.status)
+        error.status = response.status
+        if (body !== null && typeof body === 'object') {
+          if (typeof body.code === 'string') error.code = body.code
+          if (body.expectedRevision !== undefined) error.expectedRevision = body.expectedRevision
+          if (body.revision !== undefined) error.revision = body.revision
+        }
+        throw error
+      }
       return body
     })
+  })
+}
+
+/** Same-origin JSON POST (the only shape the mutating routes accept). */
+function postJson (path, body) {
+  return api(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body)
   })
 }
 
@@ -374,16 +521,132 @@ function filterExperts (experts, filter, query) {
   })
 }
 
+/**
+ * The inline actions one card offers (#9): uninstalled → install;
+ * installed + updatable → update THEN uninstall; broken → uninstall only
+ * (its fix is 卸载重装 — the host never marks a broken card updatable, and
+ * an update through a broken manifest is refused anyway).
+ */
+function cardActionsOf (expert) {
+  if (expert.installed === true) {
+    return expert.updatable === true && expert.broken !== true ? ['update', 'uninstall'] : ['uninstall']
+  }
+  return ['install']
+}
+
+/**
+ * Dictionary keys per action — one table drives the buttons, the confirm
+ * labels, and the done/failed notices of the inline row actions.
+ */
+var ACTION_TEXT = {
+  install: { button: 'installBtn', confirm: 'confirmInstall', done: 'installDone', failed: 'installFailed' },
+  update: { button: 'updateBtn', confirm: 'confirmUpdate', done: 'updateDone', failed: 'updateFailed' },
+  uninstall: { button: 'uninstallBtn', confirm: 'confirmUninstall', done: 'uninstallDone', failed: 'uninstallFailed' }
+}
+
+/**
+ * The confirm-button variant per action: destructive actions get the danger
+ * tone, constructive ones the primary — the sister's confirm-remove pairing
+ * generalized to all three confirmed actions.
+ */
+function confirmVariantOf (action) {
+  return action === 'uninstall' ? 'danger' : 'primary'
+}
+
+/** Locale-aware import timestamp; any unusable value falls back to raw. */
+function formatWhen (value, localeId) {
+  var raw = strOf(value)
+  if (raw === '') return ''
+  var date = new Date(raw)
+  if (isNaN(date.getTime())) return raw
+  try {
+    return date.toLocaleString(localeId === 'zh' ? 'zh-CN' : 'en-US', {
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+    })
+  } catch (error) {
+    return raw
+  }
+}
+
+/**
+ * One default action button. A factory (not an inline loop closure) so each
+ * button captures ITS action — a `var` loop closure would fire the last
+ * iteration's action for every button.
+ */
+function actionButton (t, action, laneBusy, onConfirm) {
+  return el('button', {
+    key: action, className: 'wbm-btn', type: 'button',
+    'data-variant': action === 'install' ? 'primary' : undefined,
+    disabled: laneBusy,
+    onClick: function () { onConfirm(action) }
+  }, t(ACTION_TEXT[action].button))
+}
+
+/** The confirm/cancel pair one action swaps in (sister's inline confirm). The
+ * confirm leg joins the lane discipline; cancel stays live (it is local). */
+function confirmPair (t, action, laneBusy, onAction, onCancelConfirm) {
+  return [
+    el('button', {
+      key: action, className: 'wbm-btn', type: 'button',
+      'data-variant': confirmVariantOf(action),
+      disabled: laneBusy,
+      onClick: function () { onAction(action) }
+    }, t(ACTION_TEXT[action].confirm)),
+    el('button', {
+      key: 'cancel', className: 'wbm-btn', type: 'button',
+      onClick: function () { onCancelConfirm() }
+    }, t('cancel'))
+  ]
+}
+
+/**
+ * The single inline action-row renderer shared by expert cards and orphan
+ * rows (#9). States, in priority order — exactly the sister's row machine:
+ *
+ *   busy (this row)      → one disabled 处理中… button;
+ *   confirming (action)  → [确认…？(variant)] [取消];
+ *   default              → one button per action.
+ *
+ * Every mutation-bound leg disables while ANY lane flight of this page is in
+ * progress (`laneBusy`: a row action, the refresh, or the path apply — the
+ * host's single flight is shared, so a click through it could only ever
+ * earn a 409).
+ */
+function ActionRow (props) {
+  var t = props.t
+  var laneBusy = props.laneBusy === true
+  var rowBusy = props.busyKey === props.rowKey
+  var buttons = null
+
+  if (rowBusy) {
+    buttons = el('button', { className: 'wbm-btn', type: 'button', disabled: true }, t('actionBusy'))
+  } else {
+    buttons = []
+    for (var i = 0; i < props.actions.length; i++) {
+      var action = props.actions[i]
+      if (props.confirmKey === props.rowKey + ':' + action) {
+        // The inline confirmation replaces the rest of the row.
+        buttons = confirmPair(t, action, laneBusy, props.onAction, props.onCancelConfirm)
+        break
+      }
+      buttons.push(actionButton(t, action, laneBusy, props.onConfirm))
+    }
+  }
+  return el('div', { className: 'wbm-actions' }, buttons)
+}
+
 // ── the card ────────────────────────────────────────────────────────────────
 
 /**
  * One expert card: avatar (PNG via avatarUrl; onError OR a PNG-less card
  * falls back to the static 🧑‍💻 emoji — no placeholder request), a
  * locale-following name over the mono id, a locale-following two-line
- * description, provenance badges (source plugin / skills count / team), and
+ * description, provenance badges (source plugin / skills count / team),
  * TOLERANT status marks — ✓ installed / ↑ updatable / ⚠ broken render only
- * when the state payload carries the field, so this page works both before
- * and after the install-state ticket lands.
+ * when the state payload carries the field — and the inline action row
+ * (#9): install / update / uninstall, each behind the sister's inline
+ * confirm. Handler props are optional so read-only renders (the smoke's
+ * card-only checks) keep working.
  */
 function ExpertCard (props) {
   var t = props.t
@@ -423,8 +686,8 @@ function ExpertCard (props) {
       t('teamBadge', { n: expert.teamSize })))
   }
 
-  // Status marks, tolerant to absent fields (they arrive with the
-  // install-state ticket; missing means "not marked", never "no").
+  // Status marks, tolerant to absent fields (missing means "not marked",
+  // never "no").
   var marks = []
   if (expert.broken === true) {
     marks.push(el('span', { key: 'broken', className: 'wbm-mark', 'data-kind': 'bad' }, '⚠ ', t('brokenStamp')))
@@ -435,6 +698,9 @@ function ExpertCard (props) {
   if (expert.updatable === true) {
     marks.push(el('span', { key: 'updatable', className: 'wbm-mark', 'data-kind': 'upd' }, '↑ ', t('updatableStamp')))
   }
+
+  var actions = cardActionsOf(expert)
+  var rowKey = 'expert:' + strOf(expert.id)
 
   return el('li', {
     className: 'wbm-card',
@@ -448,30 +714,176 @@ function ExpertCard (props) {
         el('span', { className: 'wbm-id' }, strOf(expert.id)))),
     el('p', { className: 'wbm-desc' }, localeDescriptionOf(expert, localeId)),
     badges.length > 0 ? el('div', { className: 'wbm-badges' }, badges) : null,
-    marks.length > 0 ? el('div', { className: 'wbm-status' }, marks) : null)
+    el('div', { className: 'wbm-foot' },
+      marks.length > 0 ? el('div', { className: 'wbm-status' }, marks) : null,
+      el(ActionRow, {
+        t: t,
+        rowKey: rowKey,
+        actions: actions,
+        laneBusy: props.laneBusy === true,
+        busyKey: props.busyKey || '',
+        confirmKey: props.confirmKey || '',
+        onConfirm: function (action) {
+          if (typeof props.onActionConfirm === 'function') props.onActionConfirm(rowKey + ':' + action)
+        },
+        onCancelConfirm: function () {
+          if (typeof props.onCancelConfirm === 'function') props.onCancelConfirm()
+        },
+        onAction: function (action) {
+          if (typeof props.onAction === 'function') props.onAction(expert, action)
+        }
+      })))
 }
 
-// ── the market page (read-only half) ────────────────────────────────────────
+// ── the orphan rows (#9) ─────────────────────────────────────────────────────
 
 /**
- * The settings-section page. Read-only: it pulls /api/state once per mount
- * (the payload is bilingual — a locale switch re-renders names/descriptions
- * without refetching), and every search/filter interaction is pure
- * client-side derivation over that one snapshot.
+ * One orphan preset: name + mono presetId + ⚠ when broken, a provenance
+ * meta line (source path · plugin dir/agent file · import date), and the
+ * same confirmed uninstall as the cards — the host uninstalls by expert id
+ * and the roster, not the scan table, is its authority (#9).
+ */
+function OrphanRow (props) {
+  var t = props.t
+  var orphan = props.orphan
+  var localeId = props.localeId
+  var broken = orphan.broken === true
+
+  var meta = []
+  if (strOf(orphan.sourcePath) !== '') meta.push(strOf(orphan.sourcePath))
+  var pluginDir = strOf(orphan.pluginDir)
+  var agentFile = strOf(orphan.agentFile)
+  if (pluginDir !== '' || agentFile !== '') {
+    meta.push(pluginDir + (agentFile !== '' ? '/' + agentFile : ''))
+  }
+  var when = formatWhen(orphan.importedAt, localeId)
+  if (when !== '') meta.push(t('orphanImported', { when: when }))
+  // A broken orphan carries no provenance — the host's `warning` IS its
+  // provenance (清单缺失 reason / roster reason); surface it in the row
+  // instead of leaving the ⚠ badge explaining nothing.
+  if (strOf(orphan.warning) !== '') meta.push(strOf(orphan.warning))
+
+  var rowKey = 'orphan:' + strOf(orphan.id)
+  var name = strOf(orphan.name) !== '' ? strOf(orphan.name) : strOf(orphan.id)
+
+  return el('li', { className: 'wbm-orphan', 'data-broken': broken ? 'true' : undefined },
+    el('div', { className: 'wbm-orphan-main' },
+      el('div', { className: 'wbm-orphan-line' },
+        el('span', { className: 'wbm-orphan-name', title: name }, name),
+        el('span', { className: 'wbm-orphan-id' }, strOf(orphan.presetId) !== '' ? strOf(orphan.presetId) : strOf(orphan.id)),
+        broken ? el('span', { className: 'wbm-orphan-broken' }, '⚠ ', t('orphanBroken')) : null),
+      meta.length > 0 ? el('span', { className: 'wbm-orphan-meta' }, meta.join(' · ')) : null),
+    el(ActionRow, {
+      t: t,
+      rowKey: rowKey,
+      actions: ['uninstall'],
+      laneBusy: props.laneBusy === true,
+      busyKey: props.busyKey || '',
+      confirmKey: props.confirmKey || '',
+      onConfirm: function (action) {
+        if (typeof props.onActionConfirm === 'function') props.onActionConfirm(rowKey + ':' + action)
+      },
+      onCancelConfirm: function () {
+        if (typeof props.onCancelConfirm === 'function') props.onCancelConfirm()
+      },
+      onAction: function (action) {
+        if (typeof props.onAction === 'function') props.onAction(orphan, action)
+      }
+    }))
+}
+
+// ── the refresh icon (#9) ────────────────────────────────────────────────────
+
+/** The circular-arrow glyph; it spins while `spinning` (CSS class). */
+function refreshIcon (spinning) {
+  return el('svg', {
+    viewBox: '0 0 16 16', width: 13, height: 13,
+    fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round',
+    'aria-hidden': 'true',
+    className: spinning ? 'wbm-spin' : undefined
+  },
+    el('path', { d: 'M13.5 8a5.5 5.5 0 1 1-1.62-3.88' }),
+    el('path', { d: 'M13.7 1.6v2.8h-2.8' }))
+}
+
+// ── the market page ──────────────────────────────────────────────────────────
+
+/**
+ * The settings-section page: the read-only half of #8 (one /api/state pull
+ * per mount; bilingual payload; client-side search/filter) plus the #9
+ * mutating half — the path topbar (apply with optimistic-lock revision,
+ * conflict box + retry), the spinning refresh button, inline confirmed
+ * install/update/uninstall on cards and orphans, and an action notice.
+ *
+ * Lane discipline mirrors the host's single flight: at most ONE of {row
+ * action, refresh, apply} is ever in flight from this page (their guards
+ * plus each other's disabled buttons), so a 409 can only arrive from a
+ * RACING tab — and when it does, the handler path is the ordinary error
+ * path: notice + busy state released, buttons back.
  */
 function MarketPage (props) {
   var t = props.t
 
   // Optional initial snapshot seam: undefined in production (the page fetches
   // on mount); the offline smoke renders real states through it.
+  var initialPath = props.initialState !== undefined && props.initialState !== null &&
+    typeof props.initialState.sourcePath === 'string' ? props.initialState.sourcePath : ''
   var stateState = React.useState(props.initialState === undefined ? null : props.initialState)
   var setState = stateState[1]
   var body = stateState[0]
   var experts = body !== null && body !== undefined && Array.isArray(body.experts) ? body.experts : null
+  var orphans = body !== null && body !== undefined && Array.isArray(body.orphans) ? body.orphans : []
 
   var errorState = React.useState('')
   var setError = errorState[1]
   var error = errorState[0]
+
+  // ── #9: the mutating state machine ────────────────────────────────────────
+  // busyKey: '' | 'expert:<id>' | 'orphan:<id>' — the row whose lane action
+  // is in flight (one at a time, like the sister's busyId).
+  var busyState = React.useState('')
+  var setBusyKey = busyState[1]
+  var busyKey = busyState[0]
+
+  // confirmKey: '' | '<rowKey>:<action>' — the row+action awaiting its
+  // inline confirmation; auto-reverts after 4 seconds (sister pattern).
+  var confirmState = React.useState('')
+  var setConfirmKey = confirmState[1]
+  var confirmKey = confirmState[0]
+
+  // The refresh flight: the icon spins and the button disables for its
+  // whole duration — no double submits.
+  var refreshingState = React.useState(false)
+  var setRefreshing = refreshingState[1]
+  var refreshing = refreshingState[0]
+
+  // The path-apply flight.
+  var savingState = React.useState(false)
+  var setSaving = savingState[1]
+  var saving = savingState[0]
+
+  // A config 409 SETTINGS_CONFLICT: { expected, actual } — both revisions
+  // shown, retry re-pulls and replays.
+  var conflictState = React.useState(null)
+  var setConflict = conflictState[1]
+  var conflict = conflictState[0]
+
+  // Action feedback: ok fades after 6 seconds, errors stay until the next
+  // action (sister pattern).
+  var noticeState = React.useState(null)
+  var setNotice = noticeState[1]
+  var notice = noticeState[0]
+
+  // The path draft. syncedRef holds the sourcePath the CURRENT draft was
+  // synced from: while the user has not diverged from it, every fresh
+  // payload re-syncs the draft (another tab's apply lands here too); once
+  // the user typed, the draft is theirs and only a successful apply of it
+  // re-syncs. draftRef is the async-safe read the retry flow uses.
+  var draftState = React.useState(initialPath)
+  var setDraftPath = draftState[1]
+  var draftPath = draftState[0]
+  var syncedRef = React.useRef(initialPath)
+  var draftRef = React.useRef(initialPath)
 
   var queryState = React.useState('')
   var setQuery = queryState[1]
@@ -499,18 +911,190 @@ function MarketPage (props) {
     if (next !== localeId) setLocaleId(next)
   })
 
-  // The single read-only pull (plus the retry affordance on failure). No
-  // polling, no refresh — the mutating half (ticket #9) owns rescans.
-  var refresh = React.useCallback(function () {
+  // The inline confirm auto-reverts after 4 seconds (sister pattern).
+  React.useEffect(function () {
+    if (confirmKey === '') return undefined
+    var timer = setTimeout(function () { setConfirmKey('') }, 4000)
+    return function () { clearTimeout(timer) }
+  }, [confirmKey])
+
+  // Success notices fade themselves out; errors stay until the next action.
+  React.useEffect(function () {
+    if (notice === null || notice.kind !== 'ok') return undefined
+    var timer = setTimeout(function () { setNotice(null) }, 6000)
+    return function () { clearTimeout(timer) }
+  }, [notice])
+
+  /** Adopt a fresh /api/state payload (and keep the draft in step). */
+  function adoptState (payload) {
+    var nextPath = strOf(payload !== null && payload !== undefined ? payload.sourcePath : '')
+    // Capture the pre-adopt synced value: the functional updater may run
+    // LATER than everything below it (React defers it to the render), so it
+    // must close over the value at QUEUE time — reading the ref inside the
+    // updater would compare against the already-mutated next value and
+    // never adopt.
+    var prevSynced = syncedRef.current
+    setState(payload)
+    setDraftPath(function (prev) { return prev === prevSynced ? nextPath : prev })
+    if (draftRef.current === prevSynced) draftRef.current = nextPath
+    syncedRef.current = nextPath
+  }
+
+  /**
+   * The one state pull (+ the retry affordance on failure). Returns the
+   * payload on success, undefined on failure — the conflict-retry chain
+   * stops when the pull itself fails.
+   */
+  var pullState = React.useCallback(function () {
     return api(API_BASE + '/state').then(function (payload) {
-      setState(payload)
+      adoptState(payload)
       setError('')
+      return payload
     }, function (err) {
       setError(err && err.message ? err.message : String(err))
+      return undefined
     })
   }, [])
 
-  React.useEffect(function () { refresh() }, [refresh])
+  React.useEffect(function () { pullState() }, [pullState])
+
+  /**
+   * An error message for a failed mutating call: the single-flight 409 gets
+   * its localized hint wrapped around the host's raw message; a config
+   * conflict is NOT handled here (it gets its own box).
+   */
+  function failText (key, err) {
+    var raw = err !== null && err !== undefined && err.message ? err.message : String(err)
+    var lane = err !== null && typeof err === 'object' && err.status === 409 && err.code !== 'SETTINGS_CONFLICT'
+    return t(key) + '：' + (lane ? t('laneBusy') + '（' + raw + '）' : raw)
+  }
+
+  /**
+   * POST /api/config with one revision of the optimistic lock. Success
+   * adopts the new state (banner flips to match the path's existence);
+   * a SETTINGS_CONFLICT 409 renders both revisions; anything else is an
+   * ordinary error notice. Resolves true/false — the caller releases the
+   * saving state either way.
+   */
+  function applyRequest (sourcePath, expectedRevision) {
+    return postJson(API_BASE + '/config', { sourcePath: sourcePath, expectedRevision: expectedRevision })
+      .then(function (payload) {
+        adoptState(payload)
+        setError('')
+        setConflict(null)
+        setNotice({ kind: 'ok', text: t('pathApplied', { path: sourcePath }) })
+        return true
+      }, function (err) {
+        if (err !== null && typeof err === 'object' && err.code === 'SETTINGS_CONFLICT') {
+          setConflict({
+            expected: err.expectedRevision !== undefined ? err.expectedRevision : expectedRevision,
+            actual: err.revision
+          })
+        } else {
+          setNotice({ kind: 'error', text: failText('configFailed', err) })
+        }
+        return false
+      })
+  }
+
+  var draftTrimmed = draftPath.trim()
+  var applyDisabled = saving || refreshing || busyKey !== '' ||
+    draftTrimmed === '' || draftTrimmed === syncedRef.current
+
+  var onApply = function () {
+    if (applyDisabled) return
+    setConflict(null)
+    setNotice(null)
+    setSaving(true)
+    applyRequest(draftRef.current.trim(), body !== null && body !== undefined ? body.revision : undefined)
+      .then(function () { setSaving(false) })
+  }
+
+  /**
+   * Conflict retry: re-pull the state (its payload carries the CURRENT
+   * revision), then replay the SAME draft against that revision — the
+   * acceptance's 可重试成功. A failed pull leaves the conflict box up.
+   */
+  var onConflictRetry = function () {
+    if (saving || refreshing || busyKey !== '') return
+    setNotice(null)
+    setSaving(true)
+    pullState().then(function (payload) {
+      if (payload === undefined) return undefined
+      return applyRequest(draftRef.current.trim(), payload.revision)
+    }).then(function () { setSaving(false) })
+  }
+
+  /** POST /api/refresh — forced rescan; spinner + disabled for the flight. */
+  var onRefresh = function () {
+    if (refreshing || saving || busyKey !== '') return
+    setNotice(null)
+    setRefreshing(true)
+    postJson(API_BASE + '/refresh', {}).then(function (payload) {
+      adoptState(payload)
+      setError('')
+    }, function (err) {
+      setNotice({ kind: 'error', text: failText('refreshFailed', err) })
+    }).then(function () { setRefreshing(false) })
+  }
+
+  /**
+   * One lane action (install/update/uninstall): confirm cleared, busy key
+   * on, POST, ok-notice (with any warnings the host attached) + state
+   * refetch on success, error notice on failure — and the busy key ALWAYS
+   * released, so a 409 from a racing tab leaves every button usable.
+   */
+  var runAction = function (entry) {
+    setConfirmKey('')
+    setNotice(null)
+    setBusyKey(entry.key)
+    return postJson(API_BASE + '/' + entry.action, { id: entry.id }).then(function (result) {
+      var text = t(ACTION_TEXT[entry.action].done, { name: entry.name })
+      if (result !== null && typeof result === 'object' && Array.isArray(result.warnings) && result.warnings.length > 0) {
+        text = text + '（' + result.warnings.join('；') + '）'
+      }
+      setNotice({ kind: 'ok', text: text })
+      return pullState()
+    }, function (err) {
+      setNotice({ kind: 'error', text: failText(ACTION_TEXT[entry.action].failed, err) })
+    }).then(function () { setBusyKey('') })
+  }
+
+  // Any lane flight of this page: a row action, the refresh, or the apply.
+  // Row actions guard on it AND their buttons disable under it — the host's
+  // lane is shared, so a click through another flight could only 409.
+  var laneBusy = busyKey !== '' || refreshing || saving
+
+  var onCardAction = function (expert, action) {
+    if (laneBusy) return
+    runAction({
+      key: 'expert:' + strOf(expert.id),
+      action: action,
+      id: strOf(expert.id),
+      name: localeNameOf(expert, localeId)
+    })
+  }
+
+  var onOrphanAction = function (orphan, action) {
+    if (laneBusy) return
+    var id = strOf(orphan.id)
+    runAction({
+      key: 'orphan:' + id,
+      action: action,
+      id: id,
+      name: strOf(orphan.name) !== '' ? strOf(orphan.name) : strOf(orphan.presetId)
+    })
+  }
+
+  var onActionConfirm = function (key) { setConfirmKey(key) }
+  var onCancelConfirm = function () { setConfirmKey('') }
+
+  var onDraftChange = function (event) {
+    var value = event !== null && event !== undefined && event.target !== null && event.target !== undefined
+      ? event.target.value : ''
+    draftRef.current = value
+    setDraftPath(value)
+  }
 
   var filtered = React.useMemo(function () {
     if (experts === null) return []
@@ -565,19 +1149,18 @@ function MarketPage (props) {
   } else {
     cards = el('ul', { className: 'wbm-grid' },
       filtered.map(function (expert) {
-        return el(ExpertCard, { key: strOf(expert.id), t: t, expert: expert, localeId: localeId })
+        return el(ExpertCard, {
+          key: strOf(expert.id), t: t, expert: expert, localeId: localeId,
+          laneBusy: laneBusy, busyKey: busyKey, confirmKey: confirmKey,
+          onActionConfirm: onActionConfirm, onCancelConfirm: onCancelConfirm,
+          onAction: onCardAction
+        })
       }))
   }
 
   var filteredActive = !loading && (query.trim() !== '' || filter !== 'all')
 
   return el('div', { className: 'wbm-page' },
-    missingPath
-      ? el('div', { className: 'wbm-banner', role: 'alert' },
-          el('span', null, t('bannerMissingPath')),
-          el('span', { className: 'wbm-banner-path' }, strOf(body.sourcePath)),
-          el('span', { className: 'wbm-banner-hint' }, t('bannerMissingHint')))
-      : null,
     el('header', { className: 'wbm-head' },
       el('div', { className: 'wbm-head-main' },
         el('h2', null, t('title')),
@@ -587,6 +1170,51 @@ function MarketPage (props) {
             el('span', { className: 'wbm-census-item' }, t('censusExperts', { n: stats.total })),
             el('span', { className: 'wbm-census-item' }, t('censusPlugins', { n: stats.plugins })))
         : null),
+    // The mutating topbar (#9): path draft + apply + spinning refresh.
+    el('div', { className: 'wbm-pathbar' },
+      el('div', { className: 'wbm-path-field' },
+        el('input', {
+          className: 'wbm-path-input',
+          type: 'text',
+          value: draftPath,
+          placeholder: t('pathLabel'),
+          'aria-label': t('pathLabel'),
+          disabled: saving,
+          onChange: onDraftChange
+        })),
+      el('button', {
+        className: 'wbm-btn', type: 'button',
+        disabled: applyDisabled,
+        onClick: onApply
+      }, saving ? t('applying') : t('apply')),
+      el('button', {
+        className: 'wbm-btn wbm-refresh', type: 'button',
+        title: t('refreshBtn'),
+        'aria-label': t('refreshBtn'),
+        'aria-busy': refreshing ? 'true' : undefined,
+        disabled: refreshing || saving || busyKey !== '',
+        onClick: onRefresh
+      },
+        refreshIcon(refreshing),
+        t('refreshBtn'))),
+    conflict !== null
+      ? el('div', { className: 'wbm-conflict', role: 'alert' },
+          el('span', { className: 'wbm-conflict-body' },
+            el('span', { className: 'wbm-conflict-title' }, t('conflictTitle')),
+            el('span', { className: 'wbm-conflict-detail' },
+              t('conflictDetail', { expected: conflict.expected, actual: conflict.actual }))),
+          el('button', {
+            className: 'wbm-btn', type: 'button',
+            disabled: saving || refreshing || busyKey !== '',
+            onClick: onConflictRetry
+          }, t('conflictRetry')))
+      : null,
+    missingPath
+      ? el('div', { className: 'wbm-banner', role: 'alert' },
+          el('span', null, t('bannerMissingPath')),
+          el('span', { className: 'wbm-banner-path' }, strOf(body.sourcePath)),
+          el('span', { className: 'wbm-banner-hint' }, t('bannerMissingHint')))
+      : null,
     el('input', {
       className: 'wbm-search',
       type: 'search',
@@ -631,12 +1259,31 @@ function MarketPage (props) {
                 }))
             : null)
       : null,
+    notice !== null
+      ? el('div', { className: 'wbm-notice', 'data-kind': notice.kind, role: 'status' }, notice.text)
+      : null,
     error !== ''
       ? el('div', { className: 'wbm-notice', 'data-kind': 'error', role: 'alert' },
           t('loadFailed') + '：' + error + ' ',
-          el('button', { className: 'wbm-btn', type: 'button', onClick: refresh }, t('retry')))
+          el('button', { className: 'wbm-btn', type: 'button', onClick: pullState }, t('retry')))
       : null,
-    cards)
+    cards,
+    orphans.length > 0
+      ? el('section', { className: 'wbm-orphans', 'aria-label': t('orphansTitle') },
+          el('div', { className: 'wbm-orphans-head' },
+            el('h3', { className: 'wbm-orphans-title' }, t('orphansTitle')),
+            el('span', { className: 'wbm-orphans-count' }, String(orphans.length))),
+          el('p', { className: 'wbm-orphans-hint' }, t('orphansHint')),
+          orphans.map(function (orphan) {
+            return el(OrphanRow, {
+              key: 'orphan:' + strOf(orphan.id) + ':' + strOf(orphan.presetId),
+              t: t, orphan: orphan, localeId: localeId,
+              laneBusy: laneBusy, busyKey: busyKey, confirmKey: confirmKey,
+              onActionConfirm: onActionConfirm, onCancelConfirm: onCancelConfirm,
+              onAction: onOrphanAction
+            })
+          }))
+      : null)
 }
 
 function apply (ctx) {
@@ -723,7 +1370,10 @@ module.exports.AVATAR_EMOJI = AVATAR_EMOJI
 module.exports.filterExperts = filterExperts
 module.exports.localeNameOf = localeNameOf
 module.exports.localeDescriptionOf = localeDescriptionOf
+module.exports.cardActionsOf = cardActionsOf
+module.exports.formatWhen = formatWhen
 module.exports.ExpertCard = ExpertCard
+module.exports.OrphanRow = OrphanRow
 module.exports.MarketPage = MarketPage
 return module.exports;
 } });

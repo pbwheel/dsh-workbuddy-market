@@ -59,6 +59,20 @@
  *      and — when a real harness is resolvable on this machine — both
  *      anchors gated against the SHIPPED standard (pristine) and cordis
  *      (already-patched) compositions;
+ *      update/uninstall/orphans (ticket #6, same mock roster): the in-place
+ *      re-stamp over a live fixture edit (persona swapped + a NEW skill
+ *      copied + a source-deleted skill directory removed — no copy/remove,
+ *      no 「skills 未挂载」 misreport, mount re-validated, manifest
+ *      refreshed → not updatable), the frontmatter-description-only edit
+ *      flipping updatable (#8), the disclosed touch-only false positive
+ *      (#18) with a harmless idempotent re-stamp, update's error matrix
+ *      (not installed / trust ≠ user / #17 manifest missing+corrupt+
+ *      fingerprint-less / #9 foreign source), uninstall (whole directory
+ *      gone, roster entry gone, trust refusal, orphan-by-id cleanup), and
+ *      the /api/state overlay through the routes (installed/updatable/
+ *      broken on every card, source switch → orphans reported but never
+ *      auto-uninstalled, broken manifest → card broken + the #17 warning
+ *      with install AND update refusing the same way);
  *   5c. avatar route (ticket #7): byte-exact PNG streams off the pathology
  *      fixture (a declared plugin.json avatar + a team member's own PNG)
  *      with image/png + max-age=60 + content-length, the uniform-404
@@ -901,7 +915,14 @@ const routeCatalog = createCatalog(async (rawPath) => {
 })
 const offRouteSettings = mountWorkbuddySettings(routeSettings, fakeZ, routeCatalog)
 const offRoutes = mountWorkbuddyMarketRoutes(
-  { webServer: server, settings: routeSettings },
+  {
+    webServer: server,
+    settings: routeSettings,
+    // A roster-shaped stub with nothing installed: buildState classifies
+    // against the roster on every state, and an empty one exercises the
+    // all-false overlay (the install/update paths get real rosters in 5b).
+    agentPresets: { async list() { return [] } },
+  },
   { catalog: routeCatalog },
 )
 
@@ -913,8 +934,10 @@ assert.deepEqual(
     'exact /dsh-workbuddy-market/api/install',
     'exact /dsh-workbuddy-market/api/refresh',
     'exact /dsh-workbuddy-market/api/state',
+    'exact /dsh-workbuddy-market/api/uninstall',
+    'exact /dsh-workbuddy-market/api/update',
   ],
-  'the five routes shipped so far (state/avatar/config/refresh + T4 install) under the plugin prefix',
+  'the seven routes shipped so far (state/avatar/config/refresh + T4 install + T5 update/uninstall) under the plugin prefix',
 )
 const stateRoute = server.routes.get('exact /dsh-workbuddy-market/api/state')
 const avatarRoute = server.routes.get('exact /dsh-workbuddy-market/api/avatar')
@@ -940,7 +963,9 @@ async function handle(route, request) {
   assert.equal(typeof payload.pathExists, 'boolean')
   assert.equal(typeof payload.revision, 'number')
   assert.ok(Array.isArray(payload.experts), 'experts is an array (the default path is machine-dependent)')
-  assert.deepEqual(payload.orphans, [], 'orphans field ships from day one, empty until the install ticket')
+  assert.ok(payload.experts.every((expert) => expert.installed === false && expert.updatable === false && expert.broken === false),
+    'every card carries the three install booleans, all false against an empty roster')
+  assert.deepEqual(payload.orphans, [], 'an empty roster reports no orphans')
   assert.ok(Array.isArray(payload.warnings))
   const scansBefore = routeScanCalls.length
   await handle(stateRoute, makeRequest({ url: '/dsh-workbuddy-market/api/state' }))
@@ -1184,7 +1209,8 @@ assert.equal(routeSettings.registrations.get(SETTINGS_NS).watchers.length, 0,
 
 const {
   BASE_PRESET_ID, MANIFEST_FILE, PRESET_ID_PREFIX, computeInstallFingerprint,
-  installWorkbuddyExpert, patchPersonaText, patchSkillFilesystemRow, skillsManifestOf,
+  installWorkbuddyExpert, installedMarketState, patchPersonaText, patchSkillFilesystemRow,
+  skillsManifestOf, uninstallWorkbuddyExpert, updateWorkbuddyExpert,
 } = await import(join(root, 'src', 'presets.js'))
 
 assert.equal(PRESET_ID_PREFIX, 'wb-', 'preset ids are namespaced under wb-')
@@ -1596,6 +1622,371 @@ assert.deepEqual(third.warnings, [], 'trailing-slash source spelling is the same
   rmSync(roster2.dir, { recursive: true, force: true })
 }
 
+// 5b-10 · update (ticket #6): the in-place re-stamp over a live fixture edit.
+// The `roster` still carries the restored wb-solo-one install from 5b-7.
+{
+  const agentMd = join(fixtureRoot, 'solo-one', 'agents', 'solo-one.md')
+  const originalMd = readFileSync(agentMd, 'utf8')
+
+  // The trio in ONE edit: changed persona + a NEW skill directory + a
+  // DELETED skill directory.
+  writeFileSync(agentMd, `${originalMd}\n重打后的 persona：更新闭环专用标记。\n`)
+  fixtureWrite('solo-one/skills/added-skill/SKILL.md', 'SKILL: added\n')
+  rmSync(join(fixtureRoot, 'solo-one', 'skills', 'main-skill'), { recursive: true, force: true })
+
+  const trioScan = await scanWorkbuddyRoot(fixtureRoot)
+  const trioCard = trioScan.experts.find((expert) => expert.id === 'solo-one')
+  assert.ok(trioCard !== undefined && trioCard.persona.includes('重打后的 persona'),
+    'the edited fixture scans a new persona')
+  assert.deepEqual([...trioCard.skills].sort(), ['added-skill', 'empty-skill', 'references'],
+    'the scan sees the added skill and no longer lists the deleted one')
+
+  // The overlay classifies BEFORE the update: installed + updatable, not
+  // broken, no orphans, no warnings.
+  const preState = await installedMarketState(roster, fixtureRoot, trioScan.experts)
+  assert.deepEqual(preState.byId.get('solo-one'), { installed: true, updatable: true, broken: false },
+    'the manifest fingerprint ≠ the fresh scan fingerprint → updatable')
+  assert.deepEqual(preState.orphans, [])
+  assert.deepEqual(preState.warnings, [])
+
+  const copiesBefore = roster.calls.copy.length
+  const removesBefore = roster.calls.remove.length
+  const standingsBefore = roster.calls.standing.length
+  const updated = await updateWorkbuddyExpert(roster, trioCard, fixtureRoot)
+  assert.equal(updated.presetId, 'wb-solo-one')
+  assert.deepEqual(updated.warnings, [],
+    'the already-patched composition re-patches without a 「skills 未挂载」 misreport (#7)')
+  assert.equal(roster.calls.copy.length, copiesBefore, 'update NEVER re-copies — the directory is rewritten in place')
+  assert.equal(roster.calls.remove.length, removesBefore, 'update never removes the preset')
+  assert.equal(roster.calls.standing.length, standingsBefore + 1, 'update re-runs the standing mount validation (⑥)')
+
+  const trioComposition = readFileSync(join(presetDir, 'agent.cordis.yml'), 'utf8')
+  assert.ok(trioComposition.includes(`    text: ${JSON.stringify(trioCard.persona)}`),
+    'the updated persona landed as the single-line JSON scalar at the anchored row')
+  assert.deepEqual(
+    treeOf(join(presetDir, 'skills')).map(([relative]) => relative),
+    ['added-skill/SKILL.md', 'references/data.md'],
+    'the new skill copied, the source-deleted directory removed, the survivor kept (empty-skill contributes no files)',
+  )
+  assert.equal(existsSync(join(presetDir, 'skills', 'empty-skill')), true,
+    'the EMPTY skill directory still syncs by stat-existence (#15/#21)')
+  assert.equal(updated.fingerprint, computeInstallFingerprint(trioCard, smokeSkillsRows(fixtureRoot, trioCard)),
+    'the refreshed manifest fingerprint matches an independent source walk')
+  const postTrio = await installedMarketState(roster, fixtureRoot, (await scanWorkbuddyRoot(fixtureRoot)).experts)
+  assert.deepEqual(postTrio.byId.get('solo-one'), { installed: true, updatable: false, broken: false },
+    'after the update the install fingerprint matches the scan again')
+
+  // Description-only edit: the fingerprint covers every persisted field, so
+  // a frontmatter description tweak alone flips updatable (#8).
+  writeFileSync(agentMd, readFileSync(agentMd, 'utf8').replace(
+    'description: Use when asked to review code paths end to end.',
+    'description: Edited trigger description for the fingerprint probe.',
+  ))
+  const descScan = await scanWorkbuddyRoot(fixtureRoot)
+  const descCard = descScan.experts.find((expert) => expert.id === 'solo-one')
+  const descState = await installedMarketState(roster, fixtureRoot, descScan.experts)
+  assert.equal(descState.byId.get('solo-one').updatable, true,
+    'a frontmatter description edit alone flips updatable (decision #8)')
+  await updateWorkbuddyExpert(roster, descCard, fixtureRoot)
+  assert.ok(readFileSync(join(presetDir, 'preset.yml'), 'utf8').includes(JSON.stringify(descCard.description)),
+    'preset.yml carries the edited description after the update')
+  const postDesc = await installedMarketState(roster, fixtureRoot, (await scanWorkbuddyRoot(fixtureRoot)).experts)
+  assert.equal(postDesc.byId.get('solo-one').updatable, false)
+
+  // Touch-only mtime change with NO content change: the disclosed false
+  // positive (#18) — updatable reports, and the update is harmless.
+  bumpMtime(join(fixtureRoot, 'solo-one', 'skills', 'references', 'data.md'))
+  const touchScan = await scanWorkbuddyRoot(fixtureRoot)
+  const touchState = await installedMarketState(roster, fixtureRoot, touchScan.experts)
+  assert.equal(touchState.byId.get('solo-one').updatable, true,
+    'a touch with no content change still reports updatable (disclosed, accepted #18)')
+  const compositionBeforeTouch = readFileSync(join(presetDir, 'agent.cordis.yml'), 'utf8')
+  const treeBeforeTouch = treeOf(presetDir).filter(([relative]) => relative !== MANIFEST_FILE)
+  await updateWorkbuddyExpert(roster, touchScan.experts.find((expert) => expert.id === 'solo-one'), fixtureRoot)
+  assert.equal(readFileSync(join(presetDir, 'agent.cordis.yml'), 'utf8'), compositionBeforeTouch,
+    'the touch-triggered update rewrites byte-identical composition (idempotent, harmless)')
+  assert.deepEqual(treeOf(presetDir).filter(([relative]) => relative !== MANIFEST_FILE), treeBeforeTouch,
+    'and byte-identical products all around (manifest aside)')
+  const postTouch = await installedMarketState(roster, fixtureRoot, (await scanWorkbuddyRoot(fixtureRoot)).experts)
+  assert.equal(postTouch.byId.get('solo-one').updatable, false,
+    'the update stamps the touched fingerprint — no updatable loop')
+
+  // A second update with NOTHING changed: still fine, still no warnings.
+  const quietScan = await scanWorkbuddyRoot(fixtureRoot)
+  const quietCard = quietScan.experts.find((expert) => expert.id === 'solo-one')
+  const again = await updateWorkbuddyExpert(roster, quietCard, fixtureRoot)
+  assert.deepEqual(again.warnings, [])
+  assert.equal(again.fingerprint, computeInstallFingerprint(quietCard, smokeSkillsRows(fixtureRoot, quietCard)),
+    'the quiet re-stamp converges on the same source fingerprint')
+
+  // Update error matrix.
+  const bareRoster = makeRoster()
+  await assert.rejects(
+    () => updateWorkbuddyExpert(bareRoster, soloOne, fixtureRoot),
+    /未安装：wb-solo-one/,
+    'updating a never-installed expert reports the not-installed error',
+  )
+  rmSync(bareRoster.dir, { recursive: true, force: true })
+
+  const manifestPath = join(presetDir, MANIFEST_FILE)
+  const savedManifest = readFileSync(manifestPath, 'utf8')
+  rmSync(manifestPath)
+  await assert.rejects(() => updateWorkbuddyExpert(roster, soloOne, fixtureRoot), /清单缺失，请卸载重装/,
+    'update over a MISSING manifest reports the #17 error (same wording as install)')
+  writeFileSync(manifestPath, '{ not json')
+  await assert.rejects(() => updateWorkbuddyExpert(roster, soloOne, fixtureRoot), /清单缺失，请卸载重装/,
+    'update over a CORRUPT manifest reports the same #17 error')
+  writeFileSync(manifestPath, JSON.stringify({ sourcePath: fixtureRoot }))
+  await assert.rejects(() => updateWorkbuddyExpert(roster, soloOne, fixtureRoot), /清单缺失，请卸载重装/,
+    'a manifest without a fingerprint is just as unusable (#17 — no guessing)')
+  writeFileSync(manifestPath, savedManifest)
+  await assert.rejects(
+    () => updateWorkbuddyExpert(roster, soloOne, '/definitely/another/source'),
+    /该专家已从别的源目录安装/,
+    'updating against a different source is refused like a foreign-source install (#9)',
+  )
+  roster.entries.get('wb-solo-one').trust = 'system'
+  await assert.rejects(() => updateWorkbuddyExpert(roster, soloOne, fixtureRoot), /拒绝更新/,
+    'a deployment-owned preset is never rewritten in place by the market')
+  roster.entries.get('wb-solo-one').trust = 'user'
+
+  // A failed update restores what it rewrote: standingKeyFor throwing after
+  // the writes leaves the pre-update texts in place.
+  roster.failStanding = true
+  await assert.rejects(
+    () => updateWorkbuddyExpert(roster, quietScan.experts.find((expert) => expert.id === 'solo-one'), fixtureRoot),
+    (error) => /mock mount failure/.test(error.message) && /更新中断/.test(error.message),
+    'a mid-update mount failure keeps the original cause and says the update was interrupted',
+  )
+  assert.equal(readFileSync(join(presetDir, 'agent.cordis.yml'), 'utf8'), compositionBeforeTouch,
+    'the composition was restored to its pre-update content')
+  roster.failStanding = false
+
+  // Restore the fixture to its canonical shape for the blocks below.
+  writeFileSync(agentMd, originalMd)
+  rmSync(join(fixtureRoot, 'solo-one', 'skills', 'added-skill'), { recursive: true, force: true })
+  fixtureWrite('solo-one/skills/main-skill/SKILL.md', 'SKILL: main\n')
+}
+
+// 5b-11 · uninstall (ticket #6): the whole directory goes, the roster entry
+// goes with it, and nothing the deployment owns is ever removed.
+{
+  await assert.rejects(() => uninstallWorkbuddyExpert(roster, 'solo-two'), /未安装：wb-solo-two/,
+    'uninstalling an expert that was never installed reports the clear error')
+
+  roster.entries.get('wb-solo-one').trust = 'system'
+  await assert.rejects(() => uninstallWorkbuddyExpert(roster, 'solo-one'), /拒绝卸载/,
+    'a non-user-trust entry is refused (the roster owns system presets)')
+  assert.equal(existsSync(presetDir), true, 'the refused uninstall deleted nothing')
+  roster.entries.get('wb-solo-one').trust = 'user'
+
+  assert.ok(roster.entries.has('wb-solo-one'), 'scenario anchor: the install exists before uninstalling')
+  const removed = await uninstallWorkbuddyExpert(roster, 'solo-one')
+  assert.deepEqual(removed, { presetId: 'wb-solo-one' })
+  assert.equal(existsSync(presetDir), false,
+    'the preset directory is gone WHOLE — skills tree and manifest with it')
+  assert.equal(roster.entries.has('wb-solo-one'), false, 'the roster no longer lists it')
+  assert.ok(roster.calls.remove.includes('wb-solo-one'), 'the removal went through agentPresets.remove')
+
+  const after = await installedMarketState(roster, fixtureRoot, (await scanWorkbuddyRoot(fixtureRoot)).experts)
+  assert.equal(after.byId.size, 0, 'no install flags remain')
+  assert.deepEqual(after.orphans, [], 'uninstalling is NOT orphaning — nothing lingers')
+  assert.deepEqual(after.warnings, [])
+}
+
+// 5b-12 · the routes end to end (ticket #6): state flags through /api/state
+// with the real catalog (auto-rescan on fixture edits), the update/uninstall
+// routes in the shared lane, source-switch orphans, and broken manifests.
+{
+  const server4 = makeFakeServer()
+  const roster4 = makeRoster()
+  const settings4 = makeFakeSettings()
+  const catalog4 = createCatalog()
+  const offSettings4 = mountWorkbuddySettings(settings4, fakeZ, catalog4)
+  await settings4.update(SETTINGS_NS, { sourcePath: fixtureRoot })
+  const offRoutes4 = mountWorkbuddyMarketRoutes(
+    { webServer: server4, settings: settings4, agentPresets: roster4 },
+    { catalog: catalog4 },
+  )
+  const stateRoute4 = server4.routes.get('exact /dsh-workbuddy-market/api/state')
+  const installRoute4 = server4.routes.get('exact /dsh-workbuddy-market/api/install')
+  const updateRoute4 = server4.routes.get('exact /dsh-workbuddy-market/api/update')
+  const uninstallRoute4 = server4.routes.get('exact /dsh-workbuddy-market/api/uninstall')
+  const configRoute4 = server4.routes.get('exact /dsh-workbuddy-market/api/config')
+  const getState4 = async () => (await handle(stateRoute4, makeRequest({ url: '/dsh-workbuddy-market/api/state' }))).payload
+  const post4 = (route, body) => handle(route, makeRequest({
+    method: 'POST', headers: SAME_ORIGIN, chunks: [Buffer.from(JSON.stringify(body))],
+  }))
+
+  // Guards on both new routes: 405/403 like every mutating route.
+  for (const [label, route] of [['update', updateRoute4], ['uninstall', uninstallRoute4]]) {
+    assert.equal((await handle(route, makeRequest({ method: 'GET', headers: SAME_ORIGIN }))).response.status, 405,
+      `non-POST ${label} rejected with 405`)
+    assert.equal((await handle(route, makeRequest({ method: 'POST' }))).response.status, 403,
+      `origin-less ${label} rejected with 403`)
+  }
+
+  // The lane is shared: an update held on a gated body holds config to 409.
+  {
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const heldRequest = {
+      method: 'POST',
+      url: '/dsh-workbuddy-market/api/update',
+      headers: SAME_ORIGIN,
+      [Symbol.asyncIterator]: async function* () {
+        await gate
+        yield Buffer.from(JSON.stringify({ id: 'solo-one' }))
+      },
+    }
+    const heldResponse = makeResponse()
+    const heldCall = updateRoute4.handler(heldRequest, heldResponse)
+    const during = await post4(configRoute4, { sourcePath: fixtureRoot })
+    assert.equal(during.response.status, 409, 'an in-flight update holds the shared mutation lane')
+    release()
+    await heldCall
+    assert.equal(heldResponse.status, 400, 'the held update ran (and failed: nothing installed yet)')
+    assert.match(JSON.parse(heldResponse.body).error, /未安装/)
+  }
+
+  // install → state flags installed, not updatable, not broken.
+  const installed4 = await post4(installRoute4, { id: 'solo-one' })
+  assert.equal(installed4.response.status, 200, `route install succeeds: ${installed4.response.body}`)
+  let state4 = await getState4()
+  let card4 = state4.experts.find((expert) => expert.id === 'solo-one')
+  assert.deepEqual(
+    { installed: card4.installed, updatable: card4.updatable, broken: card4.broken },
+    { installed: true, updatable: false, broken: false },
+    'the state card reports the fresh install',
+  )
+  assert.ok(state4.experts.every((expert) => expert.id === 'solo-one'
+    || (expert.installed === false && expert.updatable === false && expert.broken === false)),
+    'every OTHER card carries the all-false overlay')
+  assert.deepEqual(state4.orphans, [])
+
+  // A roster-reported broken preset (its own discovery reason) also flags
+  // the card broken — design §5: broken 兼指 roster 挂载失败与 manifest 丢失.
+  roster4.entries.get('wb-solo-one').broken = 'composition not parsable'
+  state4 = await getState4()
+  card4 = state4.experts.find((expert) => expert.id === 'solo-one')
+  assert.deepEqual(
+    { installed: card4.installed, updatable: card4.updatable, broken: card4.broken },
+    { installed: true, updatable: false, broken: true },
+    'a roster-mount failure marks the card broken (never updatable alongside)',
+  )
+  assert.ok(state4.warnings.some((warning) => warning.includes('preset 无法挂载')),
+    "the roster's own reason surfaces as a warning")
+  roster4.entries.get('wb-solo-one').broken = undefined
+  state4 = await getState4()
+  assert.equal(state4.experts.find((expert) => expert.id === 'solo-one').broken, false,
+    'clearing the roster reason clears the flag')
+
+  // Fixture edit → the NEXT state auto-rescans (catalog fingerprint) and
+  // flips updatable: the source-update detection loop, closed.
+  writeFileSync(join(fixtureRoot, 'solo-one', 'agents', 'solo-one.md'),
+    `${readFileSync(join(fixtureRoot, 'solo-one', 'agents', 'solo-one.md'), 'utf8')}\n路由级更新标记。\n`)
+  state4 = await getState4()
+  assert.equal(state4.experts.find((expert) => expert.id === 'solo-one').updatable, true,
+    'a source edit flips updatable through /api/state with no refresh call')
+
+  const upd4 = await post4(updateRoute4, { id: 'solo-one' })
+  assert.equal(upd4.response.status, 200, `route update succeeds: ${upd4.response.body}`)
+  assert.equal(upd4.payload.ok, true)
+  assert.equal(upd4.payload.presetId, 'wb-solo-one')
+  assert.deepEqual(upd4.payload.warnings, [])
+  state4 = await getState4()
+  assert.equal(state4.experts.find((expert) => expert.id === 'solo-one').updatable, false,
+    'the update cleared the flag')
+
+  // Source switch → the install becomes an orphan: reported with its
+  // provenance, never auto-uninstalled.
+  const sourceAlt = mkdtempSync(join(tmpdir(), 'dsh-workbuddy-market-alt-'))
+  const altWrite = (relative, content) => {
+    const path = join(sourceAlt, relative)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, content)
+  }
+  altWrite('alt-plugin/agents/alt-expert.md',
+    '---\nname: alt-expert\ndescription: The other source\'s expert.\n---\n\n另一源的正主。\n')
+  altWrite('alt-plugin/.codebuddy-plugin/plugin.json', JSON.stringify({ name: 'alt-plugin' }))
+
+  const switched = await post4(configRoute4, { sourcePath: sourceAlt })
+  assert.equal(switched.response.status, 200)
+  state4 = switched.payload
+  assert.deepEqual(state4.experts.map((expert) => expert.id), ['alt-expert'],
+    'the new source serves its own (uninstalled) expert')
+  assert.equal(state4.experts[0].installed, false)
+  assert.equal(state4.orphans.length, 1, 'the old install surfaces as exactly one orphan')
+  const orphan4 = state4.orphans[0]
+  assert.equal(orphan4.id, 'solo-one')
+  assert.equal(orphan4.presetId, 'wb-solo-one')
+  assert.equal(orphan4.name, 'wb-solo-one', 'name falls back to the preset id when the roster publishes none')
+  assert.equal(orphan4.sourcePath, fixtureRoot, 'the orphan records the source it was installed from')
+  assert.equal(orphan4.pluginDir, 'solo-one')
+  assert.equal(orphan4.agentFile, 'solo-one.md')
+  assert.equal(orphan4.broken, false)
+  // NEVER auto-uninstalled: roster entry and directory both survive.
+  assert.ok(roster4.entries.has('wb-solo-one'), 'the orphaned preset stays on the roster')
+  assert.equal(existsSync(join(roster4.dir, 'wb-solo-one')), true, '…and its directory stays on disk')
+
+  // An orphan is uninstallable BY ID — the designed cleanup path (#9),
+  // no scan-table membership required.
+  const un4 = await post4(uninstallRoute4, { id: 'solo-one' })
+  assert.equal(un4.response.status, 200, `orphan uninstall succeeds: ${un4.response.body}`)
+  assert.equal(un4.payload.presetId, 'wb-solo-one')
+  assert.equal(roster4.entries.has('wb-solo-one'), false)
+  state4 = await getState4()
+  assert.deepEqual(state4.orphans, [], 'the orphan is gone after the explicit uninstall')
+
+  // Switching BACK restores the expert table; nothing is installed now.
+  await post4(configRoute4, { sourcePath: fixtureRoot })
+  state4 = await getState4()
+  card4 = state4.experts.find((expert) => expert.id === 'solo-one')
+  assert.deepEqual(
+    { installed: card4.installed, updatable: card4.updatable, broken: card4.broken },
+    { installed: false, updatable: false, broken: false },
+    'switching back shows the expert uninstalled (the uninstall really removed it)',
+  )
+
+  // Broken manifest: the card goes broken + the #17 warning; install AND
+  // update refuse with the same wording; uninstall remains the recovery.
+  const reinstalled4 = await post4(installRoute4, { id: 'solo-one' })
+  assert.equal(reinstalled4.response.status, 200)
+  writeFileSync(join(roster4.dir, 'wb-solo-one', MANIFEST_FILE), '{ not json')
+  state4 = await getState4()
+  card4 = state4.experts.find((expert) => expert.id === 'solo-one')
+  assert.deepEqual(
+    { installed: card4.installed, updatable: card4.updatable, broken: card4.broken },
+    { installed: true, updatable: false, broken: true },
+    'a corrupt manifest marks the card broken (never updatable alongside)',
+  )
+  assert.ok(state4.warnings.some((warning) => warning.includes('清单缺失，请卸载重装')),
+    'the state surfaces the #17 warning text')
+  const badInstall4 = await post4(installRoute4, { id: 'solo-one' })
+  assert.equal(badInstall4.response.status, 400)
+  assert.match(badInstall4.payload.error, /清单缺失，请卸载重装/, 'install over the broken manifest reports the #17 error')
+  const badUpdate4 = await post4(updateRoute4, { id: 'solo-one' })
+  assert.equal(badUpdate4.response.status, 400)
+  assert.match(badUpdate4.payload.error, /清单缺失，请卸载重装/, 'update over the broken manifest reports the same error')
+  const recover4 = await post4(uninstallRoute4, { id: 'solo-one' })
+  assert.equal(recover4.response.status, 200, 'uninstall is the designed recovery and needs no manifest')
+  state4 = await getState4()
+  assert.ok(!state4.warnings.some((warning) => warning.includes('清单缺失')),
+    'the #17 warning disappears with the uninstalled preset')
+
+  // Uninstall route validation: unknown ids and non-ID_RE shapes.
+  for (const id of ['no-such-expert', '../etc', 'SOLO-ONE', 'solo one']) {
+    const res = await post4(uninstallRoute4, { id })
+    assert.equal(res.response.status, 400, `uninstall id "${id}" rejected with 400`)
+  }
+
+  offRoutes4()
+  assert.equal(server4.routes.size, 0)
+  offSettings4()
+  rmSync(roster4.dir, { recursive: true, force: true })
+  rmSync(sourceAlt, { recursive: true, force: true })
+}
+
 // ── 5c. avatar traversal armor (ticket #7) over a dedicated escape fixture ───
 //
 // The scanner existence-checks a DECLARED plugin.json avatar with stat —
@@ -1657,7 +2048,10 @@ assert.deepEqual(third.warnings, [], 'trailing-slash source spelling is the same
   const catalog3 = createCatalog()
   const offSettings3 = mountWorkbuddySettings(settings3, fakeZ, catalog3)
   await settings3.update(SETTINGS_NS, { sourcePath: escapeRoot })
-  const offRoutes3 = mountWorkbuddyMarketRoutes({ webServer: server3, settings: settings3 }, { catalog: catalog3 })
+  const offRoutes3 = mountWorkbuddyMarketRoutes(
+    { webServer: server3, settings: settings3, agentPresets: { async list() { return [] } } },
+    { catalog: catalog3 },
+  )
   const avatarRoute3 = server3.routes.get('exact /dsh-workbuddy-market/api/avatar')
   const stateRoute3 = server3.routes.get('exact /dsh-workbuddy-market/api/state')
 

@@ -41,10 +41,36 @@
  * (same source, existing product) removes the old install first by
  * necessity — copy() never overwrites — so a failed reinstall reports that
  * the previous install is gone and a retry restores it.
+ *
+ * Ticket #6 (T5) adds the source-update follow-through around the same
+ * manifest:
+ *
+ *   - `installedMarketState(agentPresets, rawSourcePath, experts)` — the
+ *     `/api/state` overlay: for every roster `wb-<id>` it reads the manifest
+ *     and classifies the install against the CURRENT scan table. Same source
+ *     and card present → card flags { installed, updatable } (updatable =
+ *     manifest fingerprint ≠ a fingerprint recomputed from the fresh scan;
+ *     the comparison is source-true on both sides, so degraded installs and
+ *     touch-only mtime drift report exactly as disclosed in #18/#21②). A
+ *     different manifest source, or an id the current table lacks → an
+ *     `orphans` entry — NEVER an automatic uninstall (#9). A missing or
+ *     corrupt manifest → `broken` + the 「清单缺失，请卸载重装」 warning
+ *     (#17), never a guess about where the preset came from.
+ *   - `updateWorkbuddyExpert` — in-place re-stamp of our own user-trust
+ *     product: preset.yml rewrite, persona + skill-filesystem anchor
+ *     re-patches (both idempotent), skills directory sync (copy new /
+ *     re-mirror changed / DELETE directories the source no longer lists),
+ *     manifest refresh, and a fresh `standingKeyFor` validation. No copy(),
+ *     no remove() — the preset directory itself never moves. On failure the
+ *     texts it already rewrote are restored from their in-memory originals,
+ *     so a failed update leaves the preset as loadable as it was found.
+ *   - `uninstallWorkbuddyExpert` — `agentPresets.remove()` of the whole
+ *     preset directory (skills and manifest go with it), refusing anything
+ *     not `trust: "user"` exactly like the sister plugin's uninstall.
  */
 
 import { createHash } from 'node:crypto'
-import { chmod, cp, readdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, cp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import { expandTildePath } from './scanner.js'
@@ -247,7 +273,11 @@ export function computeInstallFingerprint(card, skillsRows) {
  * Read one preset directory's install manifest.
  * @returns {Promise<{ ok: true, manifest: object } | { ok: false, reason: string }>}
  *          missing and corrupt are BOTH !ok — the design's #17 verdict treats
- *          them identically (「清单缺失，请卸载重装」)
+ *          them identically (「清单缺失，请卸载重装」). A manifest without a
+ *          usable sourcePath OR fingerprint is just as corrupt: every
+ *          manifest this plugin writes carries both, so anything less was
+ *          not written by us and must never be guessed from (the update and
+ *          updatable paths both rely on the fingerprint existing).
  */
 async function readInstallManifest(presetDir) {
   const path = join(presetDir, MANIFEST_FILE)
@@ -264,6 +294,9 @@ async function readInstallManifest(presetDir) {
     }
     if (typeof manifest.sourcePath !== 'string' || manifest.sourcePath === '') {
       throw new Error('sourcePath missing')
+    }
+    if (typeof manifest.fingerprint !== 'string' || manifest.fingerprint === '') {
+      throw new Error('fingerprint missing')
     }
     return { ok: true, manifest }
   } catch (error) {
@@ -297,6 +330,109 @@ async function tightenOwnerOnly(path) {
 }
 
 /**
+ * Mirror the source's skill directories into the preset's skills/ directory
+ * — the one filesystem writer install AND update share:
+ *
+ *   - every listed skill directory is re-copied whole (delete-then-copy, so
+ *     a file the source dropped INSIDE a surviving directory cannot linger
+ *     the way a plain recursive cp-over would let it);
+ *   - preset skill directories the source no longer lists are removed;
+ *   - a directory that vanished between scan and sync is skipped with a
+ *     warning (`action` names the caller in the message);
+ *   - dot entries are never touched — what the copy would never write, the
+ *     sync never deletes (the scanner/fingerprint visibility symmetry).
+ *
+ * On a fresh install the deletion pass meets an empty (or missing)
+ * directory and is naturally a no-op; on update it is the removal half of
+ * the sync. The skills/ directory itself is never removed — an expert that
+ * lost its last skill keeps an empty mounted directory (the standing
+ * customSkillDirs mount then simply finds no skills).
+ * @param {string} skillsRoot - the plugin's absolute skills/ directory in the source
+ * @param {string[]} skillNames - the card's (current scan) skill directory names
+ * @param {string} presetSkillsDir - the preset's absolute skills/ directory
+ * @param {'install' | 'update'} action - message label for vanished skills
+ * @param {string[]} warnings - the caller's warnings sink
+ */
+async function syncSkillDirectories(skillsRoot, skillNames, presetSkillsDir, action, warnings) {
+  const wanted = new Set(skillNames)
+  let existing = []
+  try {
+    existing = await readdir(presetSkillsDir, { withFileTypes: true })
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error
+  }
+  for (const entry of existing) {
+    if (entry.name.startsWith('.')) continue
+    if (!wanted.has(entry.name)) {
+      await rm(join(presetSkillsDir, entry.name), { recursive: true, force: true })
+    }
+  }
+  let copied = 0
+  for (const name of [...skillNames].sort()) {
+    try {
+      // Existence comes from the directory itself, never from fingerprint
+      // rows — an empty or dotfile-only directory syncs verbatim per #15
+      // while contributing no rows.
+      await stat(join(skillsRoot, name))
+    } catch {
+      warnings.push(`skill "${name}" missing at ${action} time; skipped`)
+      continue
+    }
+    await rm(join(presetSkillsDir, name), { recursive: true, force: true })
+    await cp(join(skillsRoot, name), join(presetSkillsDir, name), {
+      recursive: true,
+      dereference: true,
+    })
+    await tightenOwnerOnly(join(presetSkillsDir, name))
+    copied += 1
+  }
+  if (copied > 0) {
+    // The parent directory joins the owner-only posture too (its children
+    // were just tightened individually; this is the roster's own stance).
+    try {
+      const info = await stat(presetSkillsDir)
+      if (info.isDirectory()) await chmod(presetSkillsDir, 0o700)
+    } catch {
+      // vanished mid-sync — the sync's own error (if any) is the report
+    }
+  }
+}
+
+/**
+ * The card's skills slice of the CURRENT source tree, one shape every
+ * skills-touching caller reads (install, update, the state overlay): the
+ * card's skill directory names, the plugin's absolute skills/ root, and the
+ * fingerprint rows straight from that root. The rows are source-true by
+ * construction (#21②) — they never reflect what landed in the preset.
+ * @param {string} rawSourcePath - the RAW stored source path (tilde intact, #18)
+ * @param {object} card - the scan card
+ * @returns {Promise<{ skillNames: string[], skillsRoot: string, rows: [string, number, number][] }>}
+ */
+async function sourceSkillsSlice(rawSourcePath, card) {
+  const skillNames = Array.isArray(card.skills) ? card.skills : []
+  const skillsRoot = join(expandTildePath(rawSourcePath), card.pluginDir, 'skills')
+  const rows = skillNames.length > 0 ? await skillsManifestOf(skillsRoot, skillNames) : []
+  return { skillNames, skillsRoot, rows }
+}
+
+/**
+ * Write the fingerprint manifest (⑦, identical product from install and
+ * update): every persisted field's provenance, owner-only like the rest of
+ * what this plugin adds to the preset directory (#21③).
+ */
+async function writeInstallManifest(presetDir, card, rawSourcePath, fingerprint) {
+  const path = join(presetDir, MANIFEST_FILE)
+  await writeFile(path, `${JSON.stringify({
+    sourcePath: rawSourcePath,
+    pluginDir: card.pluginDir,
+    agentFile: card.agentFile,
+    fingerprint,
+    importedAt: new Date().toISOString(),
+  }, null, 2)}\n`, 'utf8')
+  await chmod(path, 0o600)
+}
+
+/**
  * Install one expert card as the user preset `wb-<id>` (the §4 seven steps).
  * The card comes from the CURRENT scan table of the CURRENT source; the
  * route resolves it, this function owns everything after.
@@ -318,7 +454,7 @@ export async function installWorkbuddyExpert(agentPresets, card, rawSourcePath) 
   const existing = roster.get(presetId)
   if (existing !== undefined) {
     if (typeof existing.path !== 'string') {
-      throw new Error(`已存在的 ${presetId} 缺少可定位的 preset 目录，无法读取安装清单，请卸载重装`)
+      throw new Error(`${presetId} 缺少可定位的 preset 目录，无法读取安装清单，请卸载重装`)
     }
     const presetDir = dirname(existing.path)
     const read = await readInstallManifest(presetDir)
@@ -374,36 +510,20 @@ export async function installWorkbuddyExpert(agentPresets, card, rawSourcePath) 
 
     let skillsRows = []
     if (Array.isArray(card.skills) && card.skills.length > 0) {
-      const skillsRoot = join(expandTildePath(rawSourcePath), card.pluginDir, 'skills')
       // The fingerprint slice always reflects the source as scanned — even
       // when mounting degrades below, `updatable` (#6) must stay source-true.
-      skillsRows = await skillsManifestOf(skillsRoot, card.skills)
+      const slice = await sourceSkillsSlice(rawSourcePath, card)
+      skillsRows = slice.rows
       const skillsPatch = patchSkillFilesystemRow(composition)
       if (skillsPatch === null) {
         warnings.push('skills 未挂载：skill-filesystem row not found in the copied composition; skills not copied')
       } else {
         composition = skillsPatch.text
-        // ④ copy every skill directory that still EXISTS (existence comes
-        // from the directory, never from manifest rows — an empty or
-        // dotfile-only directory copies verbatim per #15 while contributing
-        // no fingerprint rows); vanished ones warn.
-        const present = []
-        for (const name of [...card.skills].sort()) {
-          try {
-            await stat(join(skillsRoot, name))
-            present.push(name)
-          } catch {
-            warnings.push(`skill "${name}" missing at install time; skipped`)
-          }
-        }
-        for (const name of present) {
-          await cp(join(skillsRoot, name), join(presetDir, 'skills', name), {
-            recursive: true,
-            dereference: true,
-          })
-          await tightenOwnerOnly(join(presetDir, 'skills', name))
-        }
-        if (present.length > 0) await tightenOwnerOnly(join(presetDir, 'skills'))
+        // ④ mirror every listed skill directory into presetDir/skills/
+        // (shared with update; the deletion pass is a no-op on a fresh copy).
+        await syncSkillDirectories(
+          slice.skillsRoot, [...slice.skillNames], join(presetDir, 'skills'), 'install', warnings,
+        )
       }
     }
 
@@ -417,14 +537,7 @@ export async function installWorkbuddyExpert(agentPresets, card, rawSourcePath) 
 
     // ⑦ fingerprint manifest, every persisted field's provenance.
     const fingerprint = computeInstallFingerprint(card, skillsRows)
-    await writeFile(join(presetDir, MANIFEST_FILE), `${JSON.stringify({
-      sourcePath: rawSourcePath,
-      pluginDir: card.pluginDir,
-      agentFile: card.agentFile,
-      fingerprint,
-      importedAt: new Date().toISOString(),
-    }, null, 2)}\n`, 'utf8')
-    await chmod(join(presetDir, MANIFEST_FILE), 0o600)
+    await writeInstallManifest(presetDir, card, rawSourcePath, fingerprint)
 
     return { presetId, base: BASE_PRESET_ID, warnings, fingerprint }
   } catch (error) {
@@ -445,4 +558,264 @@ export async function installWorkbuddyExpert(agentPresets, card, rawSourcePath) 
     }
     throw error
   }
+}
+
+/**
+ * Classify every roster `wb-<id>` against the CURRENT scan table — the
+ * `/api/state` install overlay (ticket #6). One pass, three verdicts:
+ *
+ *   - same source + card present → flags `{ installed: true, updatable,
+ *     broken }` for the card (updatable recomputes the install fingerprint
+ *     from the fresh scan — both sides source-true per #21②, so a
+ *     frontmatter-description edit flips it (#8) and a touch-only mtime
+ *     change flips it too, the disclosed false positive of #18);
+ *   - a manifest naming ANOTHER source, or an id the current table lacks →
+ *     an `orphans` entry (#9) — reported, never uninstalled;
+ *   - a manifest that is missing or corrupt → `broken` + the #17 warning
+ *     「清单缺失，请卸载重装」 — on the card when the id is scanned, as an
+ *     orphan entry (flagged broken) when it is not, so the install stays
+ *     visible and uninstallable either way.
+ *
+ * A roster-reported broken preset (composition discovery failed) sets the
+ * card's `broken` flag too — design §5: `broken` covers roster mount
+ * failures AND manifest loss. `updatable` never accompanies `broken`: the
+ * fix the warning sells is uninstall + reinstall, not an update.
+ *
+ * @param {object} agentPresets - the injected roster service
+ * @param {string} rawSourcePath - the RAW stored source path (tilde intact, #18)
+ * @param {object[]} experts - the current scan table's cards
+ * @returns {Promise<{
+ *   byId: Map<string, { installed: boolean, updatable: boolean, broken: boolean }>,
+ *   orphans: object[],
+ *   warnings: string[],
+ * }>}
+ */
+export async function installedMarketState(agentPresets, rawSourcePath, experts) {
+  const roster = await rosterIndex(agentPresets)
+  const cards = new Map(
+    (Array.isArray(experts) ? experts : []).map((expert) => [expert.id, expert]),
+  )
+  const byId = new Map()
+  const orphans = []
+  const warnings = []
+
+  for (const entry of roster.values()) {
+    if (typeof entry.id !== 'string' || !entry.id.startsWith(PRESET_ID_PREFIX)) continue
+    const expertId = entry.id.slice(PRESET_ID_PREFIX.length)
+    const card = cards.get(expertId)
+    const rosterBroken = typeof entry.broken === 'string' && entry.broken !== ''
+
+    if (typeof entry.path !== 'string') {
+      // Cannot even locate the directory, so no manifest to classify by.
+      const warning = `${entry.id}：preset 目录不可定位（roster 条目缺少 path），请卸载重装`
+      warnings.push(warning)
+      if (card === undefined) orphans.push({ id: expertId, presetId: entry.id, broken: true, warning })
+      else byId.set(expertId, { installed: true, updatable: false, broken: true })
+      continue
+    }
+    const presetDir = dirname(entry.path)
+    const read = await readInstallManifest(presetDir)
+    if (!read.ok) {
+      const warning = `清单缺失，请卸载重装：${join(presetDir, MANIFEST_FILE)} ${read.reason}`
+      warnings.push(warning)
+      if (card === undefined) {
+        orphans.push({ id: expertId, presetId: entry.id, broken: true, warning })
+      } else {
+        byId.set(expertId, { installed: true, updatable: false, broken: true })
+      }
+      continue
+    }
+    const manifest = read.manifest
+    if (!sameSource(manifest.sourcePath, rawSourcePath) || card === undefined) {
+      // #9: installed from another source, or its expert left this source —
+      // reported as an orphan with full provenance, never touched.
+      orphans.push({
+        id: expertId,
+        presetId: entry.id,
+        name: typeof entry.name === 'string' && entry.name !== '' ? entry.name : entry.id,
+        sourcePath: manifest.sourcePath,
+        pluginDir: manifest.pluginDir,
+        agentFile: manifest.agentFile,
+        importedAt: manifest.importedAt,
+        broken: rosterBroken,
+      })
+      continue
+    }
+    if (rosterBroken) {
+      // The roster itself cannot mount this composition — broken like #17,
+      // with the roster's own reason surfaced.
+      warnings.push(`${entry.id}：preset 无法挂载（${entry.broken}）`)
+      byId.set(expertId, { installed: true, updatable: false, broken: true })
+      continue
+    }
+    // The updatable comparison walks the CURRENT source tree for the skills
+    // rows (the scanner collects names only). A source that cannot be read
+    // here degrades to a warning, exactly the scanner's own per-plugin
+    // philosophy — one unreadable skills directory never 500s the whole
+    // state; the flag simply stays unset until the read succeeds.
+    try {
+      const { rows } = await sourceSkillsSlice(rawSourcePath, card)
+      byId.set(expertId, {
+        installed: true,
+        updatable: manifest.fingerprint !== computeInstallFingerprint(card, rows),
+        broken: false,
+      })
+    } catch (error) {
+      warnings.push(`${entry.id}：无法读取源 skills 目录，跳过更新比对（${errorMessage(error)}）`)
+      byId.set(expertId, { installed: true, updatable: false, broken: false })
+    }
+  }
+  return { byId, orphans, warnings }
+}
+
+/**
+ * Update one installed expert in place (ticket #6): re-stamp the preset
+ * directory from the CURRENT scan card — preset.yml rewritten, persona and
+ * skill-filesystem rows re-patched (both idempotent), skills directories
+ * re-mirrored including the DELETION of directories the source no longer
+ * lists, manifest refreshed, mount re-validated. Never copy()/remove(): the
+ * roster entry and the directory itself are untouched, only their contents
+ * converge on the new scan.
+ *
+ * Only our own user-trust product of THIS source is ever rewritten: the
+ * checks mirror install's (not installed → clear error; trust ≠ user →
+ * refused; manifest missing/corrupt → the #17 error; foreign source → the
+ * #9 error).
+ *
+ * @param {object} agentPresets - the injected roster service
+ * @param {object} card - the CURRENT scan card for the expert
+ * @param {string} rawSourcePath - the RAW stored source path (tilde intact, #18)
+ * @returns {Promise<{ presetId: string, base: string, warnings: string[], fingerprint: string }>}
+ */
+export async function updateWorkbuddyExpert(agentPresets, card, rawSourcePath) {
+  if (card === null || typeof card !== 'object' || typeof card.id !== 'string') {
+    throw new Error('expert card missing')
+  }
+  const presetId = PRESET_ID_PREFIX + card.id
+
+  const roster = await rosterIndex(agentPresets)
+  const entry = roster.get(presetId)
+  if (entry === undefined) {
+    throw new Error(`未安装：${presetId} 不在 preset roster 中，请先安装再更新`)
+  }
+  if (entry.trust !== undefined && entry.trust !== 'user') {
+    throw new Error(`拒绝更新：${presetId} 非用户信任条目（trust: ${entry.trust}），市场只能就地重打它自己安装的 preset`)
+  }
+  if (typeof entry.path !== 'string') {
+    throw new Error(`${presetId} 缺少可定位的 preset 目录，无法读取安装清单，请卸载重装`)
+  }
+  const presetDir = dirname(entry.path)
+  const read = await readInstallManifest(presetDir)
+  if (!read.ok) {
+    throw new Error(`清单缺失，请卸载重装：${join(presetDir, MANIFEST_FILE)} ${read.reason}`)
+  }
+  if (!sameSource(read.manifest.sourcePath, rawSourcePath)) {
+    throw new Error(
+      `该专家已从别的源目录安装（已装源：${read.manifest.sourcePath}，当前源：${rawSourcePath}），请先卸载`,
+    )
+  }
+
+  const compositionPath = entry.path
+  const warnings = []
+  // The fingerprint slice is source-true even when mounting degrades (#21②)
+  // — computed BEFORE any patch decision, exactly like install.
+  const { skillNames, skillsRoot, rows: skillsRows } = await sourceSkillsSlice(rawSourcePath, card)
+
+  // Patch the composition in memory first: an anchor miss degrades to a
+  // warning instead of ever writing a half-patched file.
+  const original = await readFile(compositionPath, 'utf8')
+  let composition = original
+  const personaPatched = patchPersonaText(composition, card.persona)
+  if (personaPatched === null) {
+    warnings.push('persona row not found in the preset composition; the previously installed persona stays')
+  } else {
+    composition = personaPatched
+  }
+  let skillsMounted = false
+  if (skillNames.length > 0) {
+    const skillsPatch = patchSkillFilesystemRow(composition)
+    if (skillsPatch === null) {
+      warnings.push('skills 未挂载：skill-filesystem row not found in the preset composition; skills not synced')
+    } else {
+      composition = skillsPatch.text
+      skillsMounted = true
+    }
+  }
+
+  // No-half-update safety net: preset.yml and the composition are restored
+  // from their in-memory originals when anything after their writes fails —
+  // including REMOVING a preset.yml that did not exist before — so a failed
+  // update leaves the preset as loadable as it was found. (The skills tree
+  // has no cheap snapshot; a mid-sync failure there can leave it partially
+  // mirrored — the next update re-mirrors it whole, and the updatable
+  // comparison stays source-true either way.)
+  const ymlPath = join(presetDir, 'preset.yml')
+  const ymlExisted = await stat(ymlPath).then(() => true, () => false)
+  const originalYml = ymlExisted ? await readFile(ymlPath, 'utf8') : null
+  let wroteYml = false
+  let wroteComposition = false
+  try {
+    await writeFile(ymlPath, renderPresetYml(card), 'utf8')
+    wroteYml = true
+
+    // Skills sync: the full mirror when the row mounted, or a pure cleanup
+    // pass when the card carries no skills anymore (directories the source
+    // dropped are removed either way; the mounted skills/ directory itself
+    // survives empty rather than dangling the mount on a missing path).
+    if (skillsMounted || skillNames.length === 0) {
+      await syncSkillDirectories(skillsRoot, [...skillNames], join(presetDir, 'skills'), 'update', warnings)
+    }
+
+    if (composition !== original) {
+      await writeFile(compositionPath, composition, 'utf8')
+      wroteComposition = true
+    }
+
+    // The same standing mount a session joins — a re-stamped composition
+    // that cannot load throws here, never after a success report.
+    await agentPresets.standingKeyFor(presetId)
+
+    const fingerprint = computeInstallFingerprint(card, skillsRows)
+    await writeInstallManifest(presetDir, card, rawSourcePath, fingerprint)
+
+    return { presetId, base: BASE_PRESET_ID, warnings, fingerprint }
+  } catch (error) {
+    const cause = errorMessage(error)
+    try {
+      if (wroteYml) {
+        if (originalYml !== null) await writeFile(ymlPath, originalYml, 'utf8')
+        else await rm(ymlPath, { force: true })
+      }
+      if (wroteComposition) await writeFile(compositionPath, original, 'utf8')
+    } catch {
+      // best effort — the rethrown cause is the meaningful report
+    }
+    throw new Error(`${cause}（更新中断：preset.yml 与组合文件已尽量恢复更新前内容，请重试或卸载重装）`)
+  }
+}
+
+/**
+ * Remove one installed expert's preset — the whole roster entry: the preset
+ * directory, its skills tree, and the manifest go together (ticket #6).
+ * Refuses anything not `trust: "user"`, exactly the sister plugin's gate: a
+ * deployment-owned preset is never deleted by this market. Works for
+ * ORPHANS too — the roster is the only authority consulted, so an expert
+ * whose id the current scan table lacks (a switched-away source) still
+ * uninstalls, which is the designed cleanup path for #9.
+ * @param {object} agentPresets - the injected roster service
+ * @param {string} expertId - the expert id (the `wb-` prefix is ours to add)
+ * @returns {Promise<{ presetId: string }>}
+ */
+export async function uninstallWorkbuddyExpert(agentPresets, expertId) {
+  const presetId = PRESET_ID_PREFIX + expertId
+  const roster = await rosterIndex(agentPresets)
+  const entry = roster.get(presetId)
+  if (entry === undefined) {
+    throw new Error(`未安装：${presetId} 不在 preset roster 中`)
+  }
+  if (entry.trust !== undefined && entry.trust !== 'user') {
+    throw new Error(`拒绝卸载：${presetId} 非用户信任条目（trust: ${entry.trust}），市场只能卸载它自己安装的 preset`)
+  }
+  await agentPresets.remove(presetId)
+  return { presetId }
 }

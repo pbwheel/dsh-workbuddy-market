@@ -21,7 +21,9 @@
  *      dangling-avatar fallback, README zhDescription fallback, duplicate
  *      id first-wins + warning, broken-directory degradation, verbatim
  *      skills copying, undefined avatarPath for PNG-less experts, and the
- *      body-H1 zhName extension);
+ *      body-H1 zhName extension) — and the category extraction (#23:
+ *      plugin.json categoryId verbatim on every card, team members
+ *      included, CRLF-parsed, absent when the manifest has none);
  *   3. catalog cache + fingerprint (ticket #4): the stat-only fingerprint's
  *      stability and disclosed blind spots (a size+mtime-preserving rewrite
  *      stays invisible — refresh's raison d'être; git: copies cannot move
@@ -95,7 +97,12 @@
  *      ✓/↑/⚠ marks, pathExists=false banner appearing and clearing,
  *      collapsed-by-default warnings fold, locale-following cards), and
  *      the apply disposer releases the slot entry AND the scoped style
- *      tag (a re-apply after dispose re-injects idempotently);
+ *      tag (a re-apply after dispose re-injects idempotently) — plus the
+ *      category dimension (#23: label localization with the unknown-id
+ *      prefix-stripped fallback, chip derivation with the uncategorized
+ *      sentinel last, the 4-argument filterExperts, category haystack
+ *      spellings, the card badge, the census count, and the chip-row
+ *      click machine on the page);
  *   6c. the summon entry points (ticket #11) over the same storing React
  *      stub and scripted fetch: the zh/en instruction drafts (tool
  *      wording per src/summon.js — the draft asks the model to call
@@ -138,7 +145,9 @@
  *      provider capability gates, both tool descriptions guiding
  *      list-first, the zh/en message dicts aligned, child sessions
  *      getting an empty prompt section, and the mount disposer dropping
- *      every registration;
+ *      every registration — plus the list tool's optional category
+ *      filter (#23: verbatim raw-id matching, the category echo, and the
+ *      dedicated miss guidance in both host locales);
  *   9. the schemastery resolver, when a real harness is present on this
  *      machine, hands back a usable factory (skipped silently otherwise —
  *      this section reports, it never gates).
@@ -309,6 +318,9 @@ fixtureWrite('solo-two/.codebuddy-plugin/plugin.json', crlf(JSON.stringify({
   profession: { en: 'Container Expert', zh: '容器专家' },
   displayDescription: { en: 'English display', zh: 'CRLF plugin.json 的中文描述。' },
   avatar: 'avatars/ghost-does-not-exist.png',
+  // An unknown-to-the-client category shape: the chip row must degrade to
+  // its prefix-stripped raw name (#23), never drop or crash.
+  categoryId: '77-Future-Tech',
 }, null, 2)))
 
 // Three-agent team: every member owns <agentName>.png, team.png exists, one
@@ -374,6 +386,7 @@ fixtureWrite('team-x/.codebuddy-plugin/plugin.json', JSON.stringify({
   agentName: 'team-x-lead',
   teamInfo: { leadAgent: 'team-x-lead', memberAgents: ['team-x-maker', 'team-x-checker'] },
   profession: { en: 'Fixture Team', zh: '夹具团队' },
+  categoryId: '01-ProductDesign',
 }))
 
 // A `git:`-prefixed duplicate-install copy of the team — skipped whole.
@@ -475,6 +488,7 @@ assert.deepEqual(
   assert.deepEqual(soloOne.skills, ['empty-skill', 'main-skill', 'references'],
     'skills copies every subdirectory verbatim, including the one without SKILL.md (#15)')
   assert.equal(soloOne.teamSize, 1)
+  assert.equal(soloOne.category, '02-Engineering', 'category ← plugin.json categoryId VERBATIM (#23)')
   assert.ok(soloOne.persona.includes('# 附加规则：rules/quality.md'), 'rules are appended under a title')
   assert.ok(soloOne.persona.includes('所有输出必须自证'), 'rule body lands in the persona')
   assert.ok(!soloOne.persona.includes('\r'), 'persona never carries \\r')
@@ -495,6 +509,7 @@ assert.deepEqual(
   assert.ok(soloTwo.avatarPath.endsWith(join('solo-two', 'avatars', 'actual.png')),
     'dangling avatar reference falls back to the first PNG')
   assert.equal(soloTwo.name, 'solo-two', 'no frontmatter displayName → name falls back to the id')
+  assert.equal(soloTwo.category, '77-Future-Tech', 'category parses from a CRLF plugin.json (#14 × #23)')
 }
 
 // Team: split into per-agent cards, each member's own PNG, README fallback.
@@ -506,6 +521,7 @@ assert.deepEqual(
   for (const [id, expert] of [['team-x-lead', lead], ['team-x-maker', maker], ['team-x-checker', checker]]) {
     assert.equal(expert.teamSize, 3, `${id}: teamSize counts the directory's agent files`)
     assert.equal(expert.pluginDir, 'team-x')
+    assert.equal(expert.category, '01-ProductDesign', `${id}: the plugin-level category reaches every team member (#23)`)
     assert.ok(expert.avatarPath.endsWith(join('team-x', 'avatars', `${id}.png`)),
       `${id}: avatar hits its own <agentName>.png (never team.png / first PNG)`)
   }
@@ -536,6 +552,10 @@ assert.deepEqual(
   assert.equal(fallback.name, 'Solo Three')
   assert.equal(fallback.zhName, 'Solo Three',
     'zhName terminal fallback is the `name` field (design §2), not the raw id')
+  assert.equal(fallback.category, undefined,
+    'a plugin.json without categoryId leaves the card uncategorized (#23: absent, never faked)')
+  assert.equal(byId.get('dup-expert').category, undefined,
+    'the duplicate winner\'s plugin.json carries no category either')
 }
 
 // Every card: id shape, no \r anywhere, personas escape-checked.
@@ -2284,8 +2304,9 @@ assert.deepEqual(
   Object.keys(clientModule.DICTS.en).sort(),
   'zh/en key sets aligned',
 )
-for (const key of ['nav', 'title', 'subtitle', 'censusExperts', 'censusPlugins', 'search',
+for (const key of ['nav', 'title', 'subtitle', 'censusExperts', 'censusPlugins', 'censusCategories', 'search',
   'filterAll', 'filterInstalled', 'filterUpdatable', 'filterSkills', 'filterTeam',
+  'categoryAll', 'categoryNone', 'categoryRowLabel',
   'matchesPlain', 'matchesEcho', 'emptyHint', 'emptyTip', 'clearFilters',
   'bannerMissingPath', 'bannerMissingHint', 'warningsToggle', 'loadFailed', 'retry', 'busy',
   'installedStamp', 'updatableStamp', 'brokenStamp', 'skillsBadge', 'teamBadge',
@@ -2344,14 +2365,14 @@ const tEn = (key, params) => interp(clientModule.DICTS.en[key] ?? key, params)
 const cardAvatar = {
   id: 'backend-architect', name: 'Backend Architect', zhName: '后端架构师',
   description: 'Use when designing APIs.', zhDescription: '设计后端接口时使用。',
-  skills: [], pluginDir: 'backend-architect', teamSize: 1,
+  skills: [], pluginDir: 'backend-architect', teamSize: 1, category: '02-Engineering',
   avatarUrl: '/dsh-workbuddy-market/api/avatar?id=backend-architect',
 }
 const cardTeam = {
   id: 'team-lead', name: 'Team Lead', zhName: '队长',
   description: 'Leads the team.', zhDescription: '带队交付。',
   skills: ['main-skill', 'references'], pluginDir: 'mvp-dev-team', teamSize: 8,
-  installed: true, updatable: true,
+  category: '06-ContentCreative', installed: true, updatable: true,
 }
 const cardBroken = {
   id: 'gone', name: 'Gone', zhName: '消失的', description: 'Manifest missing.', zhDescription: '清单缺失。',
@@ -2389,6 +2410,60 @@ assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '  GONE  ')), ['
 assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '不存在')),
   [], 'a non-matching query yields nothing')
 
+// ── the category dimension (#23) ─────────────────────────────────────────────
+
+// Labels: the known map localizes, an unknown id degrades to its
+// prefix-stripped raw name in BOTH languages, absent stays ''.
+assert.equal(clientModule.categoryOf(cardAvatar), '02-Engineering', 'categoryOf reads the raw card field')
+assert.equal(clientModule.categoryOf(cardBroken), '', 'an uncategorized card reads as empty')
+assert.equal(clientModule.categoryLabelOf('02-Engineering', 'zh'), '工程开发', 'known id localizes (zh)')
+assert.equal(clientModule.categoryLabelOf('02-Engineering', 'en'), 'Engineering', 'known id localizes (en)')
+assert.equal(clientModule.categoryLabelOf('77-Future-Tech', 'zh'), 'Future-Tech',
+  'unknown id falls back to the prefix-stripped raw name (zh)')
+assert.equal(clientModule.categoryLabelOf('77-Future-Tech', 'en'), 'Future-Tech',
+  'unknown id falls back to the prefix-stripped raw name (en)')
+assert.equal(clientModule.categoryLabelOf('06-ContentCreative', 'zh'), '内容创作')
+assert.equal(clientModule.categoryLabelOf('', 'zh'), '', 'no category, no label')
+
+// Chip derivation: raw ids in marketplace order with live counts, the
+// uncategorized sentinel LAST — and only when some card lacks a category.
+assert.deepEqual(clientModule.categoryChipsOf(CARDS), [
+  { id: '02-Engineering', count: 1 },
+  { id: '06-ContentCreative', count: 1 },
+  { id: clientModule.NO_CATEGORY, count: 1 },
+], 'chips derive from the table: sorted raw ids, uncategorized last')
+assert.deepEqual(clientModule.categoryChipsOf([cardAvatar, { ...cardTeam, category: '02-Engineering' }]),
+  [{ id: '02-Engineering', count: 2 }],
+  'no uncategorized cards → no sentinel chip')
+
+// The 4th filterExperts dimension: raw id and sentinel keys, composing with
+// the status chips and the free-text query; omitted → everything.
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '')), ['backend-architect', 'team-lead', 'gone'],
+  'no category argument keeps the whole table (backward-compatible default)')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '', 'all')),
+  ['backend-architect', 'team-lead', 'gone'], "the 'all' chip keeps everything")
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '', '02-Engineering')),
+  ['backend-architect'], 'a raw categoryId chip narrows to its cards')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '', clientModule.NO_CATEGORY)),
+  ['gone'], 'the uncategorized chip catches category-less cards only')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'installed', '', '06-ContentCreative')),
+  ['team-lead'], 'category composes with the status chips')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'installed', '', '02-Engineering')),
+  [], 'status × category compose to nothing when they disagree')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '架构', '06-ContentCreative')),
+  [], 'a non-matching query stays empty inside a category')
+
+// The category joins the search haystack under every spelling: raw id, the
+// zh label, the en label — cross-language, like the name fields.
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', 'engineering')), ['backend-architect'],
+  'the en category label is searchable')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '工程开发')), ['backend-architect'],
+  'the zh category label is searchable')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '02-engineering')), ['backend-architect'],
+  'the raw category id is searchable (case-folded)')
+assert.deepEqual(idsOf(clientModule.filterExperts(CARDS, 'all', '内容创作')), ['team-lead'],
+  'another zh label matches only its own cards')
+
 // Localization chains: localized field first, base field as fallback.
 assert.equal(clientModule.localeNameOf(cardAvatar, 'zh'), '后端架构师')
 assert.equal(clientModule.localeNameOf(cardAvatar, 'en'), 'Backend Architect')
@@ -2417,6 +2492,10 @@ assert.equal(typeof imgNode.props.onError, 'function', 'the img carries the onEr
   assert.ok(text.includes('后端架构师'), 'zh card shows the zhName')
   assert.ok(text.includes('设计后端接口时使用。'), 'zh card shows the zhDescription')
   assert.ok(text.includes('backend-architect'), 'the source plugin dir badge is present')
+  assert.ok(text.includes('工程开发'), 'the category badge shows the localized label (#23)')
+  assert.ok(treeNodes(cardTree).some((node) =>
+    node.type === 'span' && node.props.className === 'wbm-badge' && node.props['data-kind'] === 'category'),
+    'the category badge is its own badge kind')
   assert.ok(!text.includes('技能'), 'a zero-skills card carries no skills badge')
   assert.ok(!text.includes('团队'), 'a solo card carries no team badge')
 }
@@ -2458,6 +2537,9 @@ cardTree = render(clientModule.ExpertCard, { t: tZh, expert: cardBroken, localeI
   assert.ok(text.includes('⚠ 预设损坏'), 'broken mark renders when the field is true')
   assert.ok(!text.includes('✓'), 'no installed mark without the field')
   assert.ok(!text.includes('↑'), 'no updatable mark without the field')
+  assert.ok(!treeNodes(cardTree).some((node) =>
+    node.props && node.props.className === 'wbm-badge' && node.props['data-kind'] === 'category'),
+    'an uncategorized card carries no category badge (absent, never 未分类)')
 }
 
 // The page over an injected snapshot (the initialState seam): the yellow
@@ -2479,6 +2561,7 @@ let pageTree = expandTree(render(clientModule.MarketPage, { t: tZh, getLocale: (
   assert.ok(text.includes('/definitely/not/here'), 'banner names the raw stored path')
   assert.ok(text.includes('专家 3'), 'census counts the experts')
   assert.ok(text.includes('来源插件 3'), 'census counts the source plugins')
+  assert.ok(text.includes('分类 2'), 'census counts the distinct non-empty categories (#23)')
   assert.ok(text.includes('后端架构师'), 'the solo card renders from the snapshot')
   assert.ok(text.includes('mvp-dev-team') && text.includes('团队 ·8'),
     'the team member renders as its collapsed group header (#12: members fold behind it)')
@@ -2486,6 +2569,42 @@ let pageTree = expandTree(render(clientModule.MarketPage, { t: tZh, getLocale: (
   assert.ok(text.includes('扫描警告 2 条'), 'the warnings fold announces its count')
   assert.equal(nodes.find((node) => node.props && node.props.className === 'wbm-warns-list'), undefined,
     'warnings are collapsed by default')
+
+  // The category chip row (#23): the all chip leads with the table total,
+  // then per-category chips with live counts, uncategorized last.
+  const catRow = nodes.find((node) => node.props && node.props.className === 'wbm-catrow')
+  assert.ok(catRow !== undefined, 'the category chip row renders when any category exists')
+  assert.equal(catRow.props.role, 'group', 'the row is a labeled group')
+  const catButtons = treeNodes(catRow).filter((node) => node.type === 'button')
+  assert.deepEqual(catButtons.map((button) => treeText(button)),
+    ['全部分类3', '工程开发1', '内容创作1', '未分类1'],
+    'chips: all + localized categories + uncategorized last, each with its live count')
+  assert.equal(catButtons[1].props.title, '02-Engineering',
+    'a category chip titles with its raw id (the verbatim filter key)')
+  assert.equal(catButtons[3].props.title, undefined, 'the uncategorized chip carries no raw-id title')
+  assert.equal(catButtons[0].props['aria-pressed'], 'true', 'the all chip starts pressed')
+
+  // Click 工程开发 → only that category's cards stay, matchline follows,
+  // and the team group auto-expands under the now-active filter — the same
+  // fold rule as the status chips.
+  catButtons[1].props.onClick()
+  let filteredTree = expandTree(render(clientModule.MarketPage, { t: tZh, getLocale: () => 'zh', initialState: missingState }))
+  let filteredText = treeText(filteredTree)
+  assert.ok(filteredText.includes('后端架构师'), 'the engineering card survives its own chip')
+  assert.ok(!filteredText.includes('消失的'), 'an uncategorized card is filtered out')
+  assert.ok(!filteredText.includes('mvp-dev-team'), 'another category\'s cards are filtered out')
+  assert.ok(filteredText.includes('共 1 位'), 'the matchline counts the category-filtered table (plain form: no query)')
+  let rerenderedButtons = treeNodes(treeNodes(filteredTree).find((node) =>
+    node.props && node.props.className === 'wbm-catrow')).filter((node) => node.type === 'button')
+  assert.equal(rerenderedButtons[1].props['aria-pressed'], 'true', 'the clicked chip announces its pressed state')
+  assert.equal(rerenderedButtons[0].props['aria-pressed'], 'false', 'the all chip releases')
+
+  // Click 全部分类 → the whole table returns.
+  rerenderedButtons[0].props.onClick()
+  filteredTree = expandTree(render(clientModule.MarketPage, { t: tZh, getLocale: () => 'zh', initialState: missingState }))
+  filteredText = treeText(filteredTree)
+  assert.ok(filteredText.includes('消失的') && filteredText.includes('mvp-dev-team'),
+    'the all chip restores every card')
 }
 
 // Path fixed → the banner is gone from the very same page.
@@ -2510,6 +2629,7 @@ pageTree = expandTree(render(clientModule.MarketPage, { t: tEn, getLocale: () =>
     'en cards show base-field names/descriptions')
   assert.ok(!text.includes('后端架构师'), 'the zhName is not rendered under en')
   assert.ok(text.includes('Source path does not exist:'), 'banner follows the language too')
+  assert.ok(text.includes('Engineering'), 'the category chip label localizes under en (#23)')
 }
 
 // Empty source: the actionable empty state, not the banner's blame.
@@ -2522,6 +2642,8 @@ pageTree = expandTree(render(clientModule.MarketPage, {
   const text = treeText(pageTree)
   assert.ok(text.includes('没有匹配的专家'), 'empty state headline')
   assert.ok(text.includes('清除筛选'), 'empty state offers the clear-filters action')
+  assert.equal(treeNodes(pageTree).find((node) => node.props && node.props.className === 'wbm-catrow'),
+    undefined, 'a table with no category at all hides the chip row entirely (#23)')
 }
 
 // apply(): the settings-section entry plus the input button's seat, style
@@ -2556,6 +2678,7 @@ assert.ok(String(styleTags[0].textContent).includes('.wbm-pathbar'), 'path topba
 assert.ok(String(styleTags[0].textContent).includes('.wbm-spin'), 'refresh spinner CSS attached')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-conflict'), 'revision conflict CSS attached')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-orphans'), 'orphans CSS attached')
+assert.ok(String(styleTags[0].textContent).includes('.wbm-catrow'), 'category chip row CSS attached (#23)')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-summon-menu'), 'summon popover CSS attached (#11)')
 assert.ok(String(styleTags[0].textContent).includes('.wbm-summon-btn'), 'summon button CSS attached (#11)')
 assert.ok(String(styleTags[0].textContent).includes('@keyframes wbm-spin'), 'the spin keyframes exist')
@@ -3515,7 +3638,7 @@ const summonWrite = (relative, content) => {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, content)
 }
-const summonExpert = (plugin, id, zhName, description, personaMark, enName) => {
+const summonExpert = (plugin, id, zhName, description, personaMark, enName, categoryId) => {
   summonWrite(`${plugin}/agents/${id}.md`, [
     '---',
     `name: ${id}`,
@@ -3526,13 +3649,16 @@ const summonExpert = (plugin, id, zhName, description, personaMark, enName) => {
     `${personaMark}`,
     '',
   ].join('\n'))
-  summonWrite(`${plugin}/.codebuddy-plugin/plugin.json`,
-    JSON.stringify({ name: plugin, profession: { zh: zhName } }))
+  summonWrite(`${plugin}/.codebuddy-plugin/plugin.json`, JSON.stringify({
+    name: plugin, profession: { zh: zhName }, ...(categoryId === undefined ? {} : { categoryId }),
+  }))
 }
-summonExpert('alpha-plugin', 'alpha-solo', '后端架构师', 'Use when designing APIs.', '阿尔法专家正文标记。', 'Alpha Solo')
-summonExpert('beta-plugin', 'beta-solo', '容器专家', 'Use when containerizing workloads.', '贝塔专家正文标记。')
+// alpha+delta share 02-Engineering (the category-filter probe), beta is
+// 06-ContentCreative, gamma carries no category at all.
+summonExpert('alpha-plugin', 'alpha-solo', '后端架构师', 'Use when designing APIs.', '阿尔法专家正文标记。', 'Alpha Solo', '02-Engineering')
+summonExpert('beta-plugin', 'beta-solo', '容器专家', 'Use when containerizing workloads.', '贝塔专家正文标记。', undefined, '06-ContentCreative')
 summonExpert('gamma-plugin', 'gamma-solo', '前端架构师', 'Use when building UI.', '伽马专家正文标记。')
-summonExpert('delta-plugin', 'delta-solo', '数据专家', 'Use when modeling data.', '德尔塔专家正文标记。')
+summonExpert('delta-plugin', 'delta-solo', '数据专家', 'Use when modeling data.', '德尔塔专家正文标记。', undefined, '02-Engineering')
 
 const summonScan = await scanWorkbuddyRoot(summonRoot)
 assert.deepEqual(summonScan.experts.map((expert) => expert.id),
@@ -3714,6 +3840,11 @@ const summonRunTool = summonCtx.registeredTools.find((tool) => tool.name === SUM
 assert.ok(summonListTool.description.includes('summon_workbuddy_expert')
   && summonListTool.description.includes('BEFORE'),
 'the list tool description points at the summon tool, list-first')
+assert.ok(summonListTool.description.includes('category')
+  && summonListTool.parameters.properties.category.type === 'string',
+'the list tool documents its optional category filter (#23)')
+assert.equal(summonListTool.parameters.required, undefined,
+  'the category argument stays optional')
 assert.ok(summonRunTool.description.includes('workbuddy_experts')
   && /first/.test(summonRunTool.description),
 'the summon tool description points back at the list tool')
@@ -3732,9 +3863,60 @@ assert.ok(summonRunTool.description.includes('Chinese name'),
   assert.equal(alpha.zhName, '后端架构师')
   assert.equal(alpha.description, 'Use when designing APIs.')
   assert.equal(alpha.zhDescription, '', 'no plugin.json displayDescription → empty string, base survives')
+  assert.equal(alpha.category, '02-Engineering',
+    'each listed expert carries its raw categoryId (#23 — the verbatim filter key)')
+  assert.equal(listed.category, undefined, 'no filter sent → the canonical value carries no category echo')
   const text = summonListTool.output.render({}, listed)[0].text
   assert.ok(text.includes('alpha-solo') && text.includes('后端架构师'),
     'zh list render shows id + zhName')
+  assert.ok(text.includes('02-Engineering'), 'the render shows each expert\'s category')
+}
+
+// The category filter (#23): verbatim raw-id matching over the summonable
+// set, with its own miss guidance (the unfiltered call is the discovery
+// path). alpha+delta installed share 02-Engineering; beta's category is
+// not installed.
+{
+  const twoRoster = makeSummonRoster(['alpha-solo', 'delta-solo'])
+  const twoCtx = makeSummonCtx({ roster: twoRoster, settings: summonSettings })
+  mountWorkbuddySummon(twoCtx, { catalog: createCatalog() })
+  const twoListTool = twoCtx.registeredTools.find((tool) => tool.name === LIST_TOOL)
+
+  const unfiltered = await twoListTool.execute({}, execStub)
+  assert.deepEqual(unfiltered.experts.map((expert) => expert.id), ['alpha-solo', 'delta-solo'],
+    'unfiltered: both installed experts')
+  assert.ok(unfiltered.experts.every((expert) => expert.category === '02-Engineering'),
+    'unfiltered listing shows the category the filter will match')
+
+  const filtered = await twoListTool.execute({ category: '02-Engineering' }, execStub)
+  assert.deepEqual(
+    { total: filtered.total, ids: filtered.experts.map((expert) => expert.id), category: filtered.category },
+    { total: 2, ids: ['alpha-solo', 'delta-solo'], category: '02-Engineering' },
+    'a matching category keeps its experts and echoes the filter',
+  )
+
+  const miss = await twoListTool.execute({ category: '06-ContentCreative' }, execStub)
+  assert.deepEqual(miss, { experts: [], total: 0, category: '06-ContentCreative' },
+    'an installed-but-empty category answers empty with the echo')
+  const missText = twoListTool.output.render({}, miss)[0].text
+  assert.ok(missText.includes('06-ContentCreative') && missText.includes('不带 category'),
+    'the category-miss render names the category and the discovery path')
+
+  const unknown = await twoListTool.execute({ category: '  99-Nowhere  ' }, execStub)
+  assert.equal(unknown.category, '99-Nowhere', 'a category argument is trimmed before matching')
+  assert.equal(unknown.total, 0, 'an unknown category matches nothing')
+  assert.ok(twoListTool.output.render({}, unknown)[0].text.includes('99-Nowhere'),
+    'the unknown-category miss renders its own guidance (not the generic empty message)')
+
+  const enMissCtx = makeSummonCtx({
+    roster: twoRoster,
+    settings: { get: (ns) => (ns === 'locale' ? { preference: 'en' } : ns === SETTINGS_NS ? { sourcePath: summonRoot } : undefined) },
+  })
+  mountWorkbuddySummon(enMissCtx, { catalog: createCatalog() })
+  const enMissTool = enMissCtx.registeredTools.find((tool) => tool.name === LIST_TOOL)
+  const enMiss = await enMissTool.execute({ category: '06-ContentCreative' }, execStub)
+  assert.ok(enMissTool.output.render({}, enMiss)[0].text.includes('without category'),
+    'the en category-miss render carries the EN guidance')
 }
 
 // Empty roster → the actionable empty message (zh default).

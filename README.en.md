@@ -55,10 +55,10 @@ Zero build, zero runtime dependencies, no install scripts: the cloned directory 
 
 ## Using it
 
-- **Market page** (Settings → WorkBuddy Experts): search hits both languages; filter chips (all/installed/updatable/with skills/team); **team plugins fold into one expandable group header** (stacked member faces + aggregated counts) while solo experts lay out flat; groups auto-expand while a search or filter is active.
+- **Market page** (Settings → WorkBuddy Experts): search hits both languages; filter chips (all/installed/updatable/with skills/team); **category chips** derived from the WorkBuddy marketplace grouping keys (`categoryId` — known keys localize, unknown keys show their prefix-stripped name, category-less cards bucket under "Uncategorized"), stacking with the status chips and the search as a third dimension; cards carry a category badge and the census counts categories. **Team plugins fold into one expandable group header** (stacked member faces + aggregated counts) while solo experts lay out flat; groups auto-expand while a search or filter is active.
 - **Update all**: appears whenever updatable cards exist — updates strictly one at a time, each finished card refreshes in place; a mid-run failure stops with the reason shown and can be continued for the remainder.
 - **Orphans**: after switching source directories, presets installed from another source are listed under "Installed from another source" — listed only, never blocking the market; confirmed uninstall by id.
-- **Summoning**: let the model call the tools in any session, or use the input-box button / type `@` — the latter two only draft the instruction.
+- **Summoning**: let the model call the tools in any session (`workbuddy_experts` lists each expert with its category and takes an optional `category` argument filtering by the raw `categoryId`), or use the input-box button / type `@` — the latter two only draft the instruction.
 
 ## Configuration
 
@@ -68,7 +68,7 @@ The source directory lives in the host settings namespace `workbuddy-market` as 
 
 | Route | Method | Semantics |
 |---|---|---|
-| `/api/state` | GET | `{ sourcePath, pathExists, revision, experts, orphans, warnings }`; every card carries `installed/updatable/broken/avatarUrl`; fingerprint-checked, auto-rescans on change |
+| `/api/state` | GET | `{ sourcePath, pathExists, revision, experts, orphans, warnings }`; every card carries `installed/updatable/broken/avatarUrl/category` (the category is the plugin.json `categoryId` verbatim, absent when the source has none); fingerprint-checked, auto-rescans on change |
 | `/api/avatar?id=` | GET | Streams the expert's PNG from the current scan table on demand (never copied); the id must pass `ID_RE`, hit the scan table, and stay inside the source root after realpath — every miss answers one identical 404; `image/png` + `max-age=60` |
 | `/api/config` | POST | `{ sourcePath, expectedRevision? }` → saves the raw path, answers with the new state; stale revisions get 409 |
 | `/api/refresh` | POST | Forced rescan, answers with the new state |

@@ -41,6 +41,12 @@
  *   agentFile    ← the card's agent md file name inside agents/ (install
  *                provenance — the fingerprint manifest records it, ticket #5)
  *   teamSize     ← number of agent files in the plugin directory
+ *   category     ← plugin.json `categoryId` VERBATIM ("02-Engineering"-style
+ *                WorkBuddy marketplace grouping key; plugin-level, so every
+ *                team member carries it too) — undefined when the manifest
+ *                has none (4/42 of the real corpus). The raw string IS the
+ *                filter key on every surface (client chips, tool param);
+ *                label translation lives client-side only (decision #23)
  *
  * BODY-H1 EXTENSION (decision #19, additive): the real corpus has 4 experts
  * with NO Chinese metadata anywhere (no frontmatter displayName/profession,
@@ -60,9 +66,11 @@
  * frontmatter `maxTurns`, `agentMode`, `enabled*`, `vibe`/`emoji`/`color`,
  * and the frontmatter `skills` list (the directory is the truth source #15);
  * plugin.json `version`, `homepage`, `defaultInitPrompt`, `quickPrompts`,
- * `categoryId`, `tags`, plus `author`/`license`/`keywords`/`mcp`/
- * `connectorIds`/`dependencies`/`teamInfo`/`members`; SKILL.md `allowed-tools`
- * (skill contents are not read at scan time at all).
+ * `tags` (zh/en labels — #12 scoped categories to `categoryId` alone, #23
+ * revived it as the card's `category`; tags stay dropped), plus `author`/
+ * `license`/`keywords`/`mcp`/`connectorIds`/`dependencies`/`teamInfo`/
+ * `members`; SKILL.md `allowed-tools` (skill contents are not read at scan
+ * time at all).
  *
  * Degradation rules (§2, #16 #17): `git:`-prefixed directories are skipped
  * whole and silently (WorkBuddy duplicate-install copies whose agent ids
@@ -449,6 +457,10 @@ async function scanPluginDirectory(pluginDir) {
   const readmeParagraph = firstNonTitleParagraph(await readOptionalText(join(pluginDir, 'README.md')))
   const manifestProfessionZh = zhOf(manifest.profession)
   const manifestDescriptionZh = zhOf(manifest.displayDescription)
+  // The WorkBuddy marketplace grouping key, kept VERBATIM (#23): plugin-level
+  // (every team member carries it), absent for plugins without one — the
+  // raw string doubles as the filter key on the client chips and the tool.
+  const manifestCategory = stringOf(manifest.categoryId)
 
   const cards = []
   for (const file of agentFiles) {
@@ -511,6 +523,7 @@ async function scanPluginDirectory(pluginDir) {
         pluginDir: pluginName,
         agentFile: file,
         teamSize: agentFiles.length,
+        category: manifestCategory === '' ? undefined : manifestCategory,
       })
     } catch (error) {
       warnings.push(`${pluginName}/agents/${file}: expert skipped (${messageOf(error)})`)

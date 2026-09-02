@@ -8,9 +8,14 @@
  * a one-shot specialist subagent, so a running session can consult or switch
  * experts without restarting on a different preset.
  *
- *   workbuddy_experts()                    → id/name/zhName/description of
- *                                            every installed (summonable)
- *                                            WorkBuddy expert
+ *   workbuddy_experts([category])          → id/name/zhName/description/
+ *                                            category of every installed
+ *                                            (summonable) WorkBuddy expert,
+ *                                            optionally narrowed to one
+ *                                            WorkBuddy marketplace category
+ *                                            (the scan card's raw
+ *                                            categoryId, e.g.
+ *                                            "02-Engineering")
  *   summon_workbuddy_expert(expert, task)  → delegate one task; the scan
  *                                            card's COMPLETE persona is
  *                                            handed to
@@ -119,6 +124,7 @@ const ZH = {
   'error.expertRun': '专家运行以“{reason}”结束{detail}',
   'error.partialOutput': '\n部分输出：\n{text}',
   'list.empty': '当前没有可召唤的 WorkBuddy 专家：尚未安装任何专家，或源目录没有扫到专家。请先在 设置 → WorkBuddy 专家 安装或检查源路径。',
+  'list.emptyCategory': '分类「{category}」下没有可召唤的 WorkBuddy 专家。调用 workbuddy_experts（不带 category）可查看全部已安装专家及其分类。',
   'list.heading': '共 {total} 位可召唤的 WorkBuddy 专家：',
 }
 
@@ -136,6 +142,7 @@ const EN = {
   'error.expertRun': 'expert run ended with "{reason}"{detail}',
   'error.partialOutput': '\nPartial output:\n{text}',
   'list.empty': 'No WorkBuddy experts are summonable yet: nothing is installed, or the source directory scanned none. Install experts (or check the source path) in Settings → WorkBuddy 专家 first.',
+  'list.emptyCategory': 'No summonable WorkBuddy experts in category "{category}". Call workbuddy_experts without category to list every installed expert with its category.',
   'list.heading': '{total} summonable WorkBuddy expert(s):',
 }
 
@@ -361,21 +368,31 @@ async function runExpert(ctx, catalog, locale, query, task, exec) {
 const SECTION_TEXT = [
   '## WorkBuddy expert summoning',
   'WorkBuddy experts installed from the WorkBuddy Expert Market (Settings → WorkBuddy 专家) can be summoned in ANY session, mid-conversation — no new session needed.',
-  '- `workbuddy_experts()` lists installed experts (id, English name, Chinese name, description).',
+  '- `workbuddy_experts()` lists installed experts (id, English name, Chinese name, description, category); an optional category argument (the raw WorkBuddy categoryId the listing shows, e.g. "02-Engineering") narrows the list.',
   '- `summon_workbuddy_expert(expert, task)` delegates one self-contained task to that expert: a specialist subagent runs with the expert persona and this call returns its answer.',
   'Use it whenever the user asks to consult a WorkBuddy expert or a task clearly belongs to one; different experts can be summoned for different tasks in the same conversation. `expert` accepts the id (preferred), the English name, or the Chinese name (中文可模糊匹配). Not-installed experts cannot be summoned — tell the user to install them in Settings → WorkBuddy 专家 first.',
 ].join('\n')
 
+/** The scan card's category ('' when the source plugin.json had none). */
+function categoryOf(expert) {
+  return typeof expert?.category === 'string' ? expert.category.trim() : ''
+}
+
 /** Render the list tool's canonical value as model-facing text. */
 function renderExpertList(locale, _args, value) {
-  if (value.experts.length === 0) return format(locale, 'list.empty')
+  if (value.experts.length === 0) {
+    // A category-filtered miss gets its own guidance: the unfiltered call
+    // is the discovery path for valid category values.
+    return typeof value.category === 'string' && value.category !== ''
+      ? format(locale, 'list.emptyCategory', { category: value.category })
+      : format(locale, 'list.empty')
+  }
   const lines = [format(locale, 'list.heading', { total: value.total })]
   for (const expert of value.experts) {
-    if (locale === 'en') {
-      lines.push(`- ${expert.id} · ${expert.name} — ${expert.description}`)
-    } else {
-      lines.push(`- ${expert.id} · ${expert.zhName} — ${expert.zhDescription || expert.description}`)
-    }
+    const base = locale === 'en'
+      ? `- ${expert.id} · ${expert.name} — ${expert.description}`
+      : `- ${expert.id} · ${expert.zhName} — ${expert.zhDescription || expert.description}`
+    lines.push(categoryOf(expert) === '' ? base : `${base} · ${expert.category}`)
   }
   return lines.join('\n')
 }
@@ -399,10 +416,16 @@ export function mountWorkbuddySummon(ctx, { catalog }) {
     ctx.tools.register({
       name: LIST_TOOL,
       description:
-        'List WorkBuddy experts installed from the WorkBuddy Expert Market that can be summoned in the current session: each expert\'s id, English name, Chinese name (zhName), and description. Call this BEFORE summon_workbuddy_expert whenever you do not know the exact expert id — summoning accepts an id, the English name, or the Chinese name. Only installed experts are summonable; users install experts in Settings → WorkBuddy 专家 (WorkBuddy Expert Market).',
+        'List WorkBuddy experts installed from the WorkBuddy Expert Market that can be summoned in the current session: each expert\'s id, English name, Chinese name (zhName), description, and category. Call this BEFORE summon_workbuddy_expert whenever you do not know the exact expert id — summoning accepts an id, the English name, or the Chinese name. The optional `category` narrows the list to one WorkBuddy marketplace category (the raw categoryId the unfiltered listing shows per expert, e.g. "02-Engineering"); omit it to see every installed expert with its category. Only installed experts are summonable; users install experts in Settings → WorkBuddy 专家 (WorkBuddy Expert Market).',
       parameters: {
         type: 'object',
-        properties: {},
+        properties: {
+          category: {
+            type: 'string',
+            description:
+              'Optional category filter — the raw WorkBuddy categoryId verbatim (e.g. "02-Engineering", "06-ContentCreative"); experts without a category never match. Omit to list all installed experts.',
+          },
+        },
         additionalProperties: false,
       },
       output: {
@@ -421,11 +444,13 @@ export function mountWorkbuddySummon(ctx, { catalog }) {
                   zhName: { type: 'string' },
                   description: { type: 'string' },
                   zhDescription: { type: 'string' },
+                  category: { type: 'string' },
                 },
-                required: ['id', 'name', 'zhName', 'description', 'zhDescription'],
+                required: ['id', 'name', 'zhName', 'description', 'zhDescription', 'category'],
               },
             },
             total: { type: 'integer' },
+            category: { type: 'string' },
           },
           required: ['experts', 'total'],
         },
@@ -433,20 +458,28 @@ export function mountWorkbuddySummon(ctx, { catalog }) {
           { type: 'text', text: renderExpertList(activeLocale(ctx), args, value) },
         ],
       },
-      async execute() {
+      async execute(args) {
         const locale = activeLocale(ctx)
         const rawSourcePath = currentRawSourcePath(ctx.get('settings'))
         const scan = await catalog.stateOf(rawSourcePath)
         const summonable = await summonableCards(ctx.agentPresets, rawSourcePath, scan.experts)
+        // The category filter takes the raw categoryId VERBATIM (#23): what
+        // the unfiltered render shows is exactly what matches here.
+        const requested = args && typeof args.category === 'string' ? args.category.trim() : ''
+        const listed = requested === ''
+          ? summonable
+          : summonable.filter((expert) => categoryOf(expert) === requested)
         return {
-          experts: summonable.map((expert) => ({
+          experts: listed.map((expert) => ({
             id: String(expert.id),
             name: String(expert.name ?? expert.id),
             zhName: String(expert.zhName ?? ''),
             description: String(expert.description ?? ''),
             zhDescription: String(expert.zhDescription ?? ''),
+            category: categoryOf(expert),
           })),
-          total: summonable.length,
+          total: listed.length,
+          ...(requested !== '' ? { category: requested } : {}),
         }
       },
     }),

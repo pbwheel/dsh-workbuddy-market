@@ -165,6 +165,10 @@ var CSS = `
   font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, inherit); }
 .wbm-chip[data-active="true"] .wbm-chip-count { color: rgba(255,255,255,.78); }
 
+/* ── the category chip row: a SECOND, orthogonal filter dimension ────────── */
+.wbm-catrow { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.wbm-catrow .wbm-chip-label { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* ── match feedback: the filter stays visible while typing ───────────────── */
 .wbm-matchline { margin: 0; font-family: ${MONO}; font-size: 11px; line-height: 1.5;
   font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-tertiary, inherit); }
@@ -211,6 +215,8 @@ var CSS = `
   border: 1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.3));
   color: var(--dsw-alias-label-tertiary, inherit); }
 .wbm-badge[data-kind="plugin"] { font-family: ${MONO}; font-size: 10px; }
+.wbm-badge[data-kind="category"] { color: var(--dsw-alias-label-secondary, inherit);
+  border-color: color-mix(in srgb, var(--dsw-alias-label-secondary, rgba(127,127,127,.6)) 30%, transparent); }
 .wbm-badge[data-kind="team"] { color: var(--dsw-alias-brand-primary, #4f6ef7);
   border-color: color-mix(in srgb, var(--dsw-alias-brand-primary, #4f6ef7) 40%, transparent); }
 
@@ -379,12 +385,16 @@ var DICTS = {
     subtitle: '浏览本地 WorkBuddy 专家，装为用户预设；目录变了就刷新或改路径。',
     censusExperts: '专家 {n}',
     censusPlugins: '来源插件 {n}',
+    censusCategories: '分类 {n}',
     search: '搜索名称、描述或 id —— 中英文都行',
     filterAll: '全部',
     filterInstalled: '已装',
     filterUpdatable: '可更新',
     filterSkills: '含技能',
     filterTeam: '团队',
+    categoryAll: '全部分类',
+    categoryNone: '未分类',
+    categoryRowLabel: '按分类筛选',
     matchesPlain: '共 {n} 位',
     matchesEcho: '匹配 {n} 位 ·「{q}」',
     emptyHint: '没有匹配的专家',
@@ -461,12 +471,16 @@ var DICTS = {
     subtitle: 'Browse local WorkBuddy experts and install them as user presets; refresh or repoint the path when the directory moves.',
     censusExperts: '{n} experts',
     censusPlugins: '{n} plugins',
+    censusCategories: '{n} categories',
     search: 'Search names, descriptions, or ids — both languages',
     filterAll: 'All',
     filterInstalled: 'Installed',
     filterUpdatable: 'Updatable',
     filterSkills: 'With skills',
     filterTeam: 'Team',
+    categoryAll: 'All categories',
+    categoryNone: 'Uncategorized',
+    categoryRowLabel: 'Filter by category',
     matchesPlain: '{n} shown',
     matchesEcho: '{n} matches for "{q}"',
     emptyHint: 'No matching experts',
@@ -623,16 +637,108 @@ function hasSkills (expert) {
   return Array.isArray(expert.skills) && expert.skills.length > 0
 }
 
+// ── the category dimension (decision #23) ────────────────────────────────────
+//
+// The scanner keeps plugin.json `categoryId` VERBATIM on every card
+// ("02-Engineering"-style WorkBuddy marketplace grouping keys). The raw
+// string is the filter key on every surface; only the DISPLAY label is
+// derived here, so an unknown category from a future source directory still
+// filters perfectly — it just shows its prefix-stripped raw name.
+
+/** Chip id for experts whose plugin.json carried no categoryId. */
+var NO_CATEGORY = '·uncategorized·'
+
+/**
+ * WorkBuddy marketplace grouping keys seen in the real corpus, localized
+ * for display. Data-derived, not a registry: keys absent here degrade to
+ * categoryLabelOf's prefix-stripped fallback, so a new category in the
+ * source directory needs no client change.
+ */
+var KNOWN_CATEGORY_LABELS = {
+  '01-ProductDesign': { zh: '产品设计', en: 'Product Design' },
+  '02-Engineering': { zh: '工程开发', en: 'Engineering' },
+  '04-DataAI': { zh: '数据与 AI', en: 'Data & AI' },
+  '06-ContentCreative': { zh: '内容创作', en: 'Content & Creative' },
+  '08-FinanceInvestment': { zh: '金融投资', en: 'Finance & Investment' },
+  '10-ProjectQuality': { zh: '项目与质量', en: 'Project & Quality' }
+}
+
+/** The card's raw category string ('' when the source had none). */
+function categoryOf (expert) {
+  return strOf(expert !== null && typeof expert === 'object' ? expert.category : undefined)
+}
+
+/** The card's chip key: the raw category, or the uncategorized sentinel. */
+function categoryKeyOf (expert) {
+  var raw = categoryOf(expert)
+  return raw !== '' ? raw : NO_CATEGORY
+}
+
+/**
+ * The display label of one raw categoryId under one UI language: the known
+ * map first, then the WorkBuddy numeric prefix ("02-") stripped and the
+ * remainder verbatim (both languages — an unknown key has no translation
+ * to localize), the raw string itself as the terminal fallback.
+ */
+function categoryLabelOf (rawCategory, localeId) {
+  var raw = strOf(rawCategory)
+  if (raw === '') return ''
+  var known = KNOWN_CATEGORY_LABELS[raw]
+  if (known !== undefined) return localeId === 'zh' ? known.zh : known.en
+  var stripped = raw.replace(/^\d+[-_]/, '')
+  return stripped !== '' ? stripped : raw
+}
+
+/**
+ * The searchable text one category contributes: the raw id plus every
+ * label spelling, so「工程」and "engineering" both hit under either UI
+ * language (the same cross-language invariant the name fields keep).
+ */
+function categoryHayshare (rawCategory) {
+  var raw = strOf(rawCategory)
+  if (raw === '') return ''
+  var known = KNOWN_CATEGORY_LABELS[raw]
+  return [raw, categoryLabelOf(raw, 'zh'), categoryLabelOf(raw, 'en'),
+    known === undefined ? '' : raw.replace(/^\d+[-_]/, ''), ''].join(' ').trim()
+}
+
+/**
+ * The category chip entries of one table (locale-free — labels resolve at
+ * render): raw ids name-sorted (the WorkBuddy numeric prefixes keep the
+ * marketplace's own order), each with its live count, and the uncategorized
+ * sentinel LAST when any card lacks a category. Deriving from the table is
+ * what makes unknown categories work with zero client changes.
+ */
+function categoryChipsOf (experts) {
+  var counts = {}
+  var order = []
+  var none = 0
+  var list = Array.isArray(experts) ? experts : []
+  for (var i = 0; i < list.length; i++) {
+    var expert = list[i]
+    if (expert === null || typeof expert !== 'object') continue
+    var raw = categoryOf(expert)
+    if (raw === '') { none++; continue }
+    if (counts[raw] === undefined) { counts[raw] = 0; order.push(raw) }
+    counts[raw]++
+  }
+  order.sort()
+  var chips = order.map(function (raw) { return { id: raw, count: counts[raw] } })
+  if (none > 0) chips.push({ id: NO_CATEGORY, count: none })
+  return chips
+}
+
 /**
  * The search haystack of one card. Both languages' name/description are
  * always present (the BASE fields are never dropped — a Chinese query hits
  * under an English UI and vice versa), plus the id, the source plugin dir,
- * and every skill name.
+ * every skill name, and the category's searchable spellings.
  */
 function haystackOf (expert) {
   return [strOf(expert.id), strOf(expert.name), strOf(expert.zhName),
     strOf(expert.description), strOf(expert.zhDescription), strOf(expert.pluginDir),
-    (Array.isArray(expert.skills) ? expert.skills : []).join(' ')].join(' ').toLowerCase()
+    (Array.isArray(expert.skills) ? expert.skills : []).join(' '),
+    categoryHayshare(categoryOf(expert))].join(' ').toLowerCase()
 }
 
 /**
@@ -660,15 +766,19 @@ function filterOf (filterId) {
 }
 
 /**
- * One filter pass: the chip state crossed with a free-text query. Pure and
+ * One filter pass: the chip state crossed with the free-text query and the
+ * category dimension (#23 — `category` is a chip id: a raw categoryId or
+ * the NO_CATEGORY sentinel; 'all'/undefined keeps everything). Pure and
  * synchronous — search and filtering are purely client-side by design
  * (ticket #8).
  */
-function filterExperts (experts, filter, query) {
+function filterExperts (experts, filter, query, category) {
   var keep = filterOf(filter).keep
   var q = strOf(query).toLowerCase()
+  var wantCategory = typeof category === 'string' && category !== '' && category !== 'all'
   return experts.filter(function (expert) {
     if (!keep(expert)) return false
+    if (wantCategory && categoryKeyOf(expert) !== category) return false
     if (q === '') return true
     return haystackOf(expert).indexOf(q) !== -1
   })
@@ -914,6 +1024,12 @@ function ExpertCard (props) {
   var pluginDir = strOf(expert.pluginDir)
   if (pluginDir !== '') {
     badges.push(el('span', { key: 'plugin', className: 'wbm-badge', 'data-kind': 'plugin', title: pluginDir }, pluginDir))
+  }
+  var category = categoryOf(expert)
+  if (category !== '') {
+    badges.push(el('span', {
+      key: 'category', className: 'wbm-badge', 'data-kind': 'category', title: category
+    }, categoryLabelOf(category, localeId)))
   }
   if (hasSkills(expert)) {
     badges.push(el('span', { key: 'skills', className: 'wbm-badge', 'data-kind': 'skills' },
@@ -1251,6 +1367,11 @@ function MarketPage (props) {
   var setFilter = filterState[1]
   var filter = filterState[0]
 
+  // The category chip (#23): 'all' | one raw categoryId | NO_CATEGORY.
+  var categoryState = React.useState('all')
+  var setCategory = categoryState[1]
+  var category = categoryState[0]
+
   // Scan warnings fold: collapsed by default — warnings are provenance, not
   // an alarm; the count is visible either way.
   var warnOpenState = React.useState(false)
@@ -1524,16 +1645,18 @@ function MarketPage (props) {
 
   var filtered = React.useMemo(function () {
     if (experts === null) return []
-    return filterExperts(experts, filter, query)
-  }, [experts, filter, query])
+    return filterExperts(experts, filter, query, category)
+  }, [experts, filter, query, category])
 
   // Census + per-chip counts, in one pass over the full table — the chip
   // predicates come from the shared FILTERS table, so a new chip counts
-  // itself.
+  // itself. The census's category count is the number of DISTINCT non-empty
+  // category values (uncategorized cards belong to no category).
   var stats = React.useMemo(function () {
     if (experts === null) return null
-    var out = { total: experts.length, plugins: 0 }
+    var out = { total: experts.length, plugins: 0, categories: 0 }
     var pluginDirs = {}
+    var categoryValues = {}
     for (var f = 1; f < FILTERS.length; f++) out[FILTERS[f].stat] = 0
     for (var i = 0; i < experts.length; i++) {
       var expert = experts[i]
@@ -1541,9 +1664,19 @@ function MarketPage (props) {
         if (FILTERS[g].keep(expert)) out[FILTERS[g].stat]++
       }
       pluginDirs[strOf(expert.pluginDir)] = true
+      var rawCategory = categoryOf(expert)
+      if (rawCategory !== '') categoryValues[rawCategory] = true
     }
     out.plugins = Object.keys(pluginDirs).length
+    out.categories = Object.keys(categoryValues).length
     return out
+  }, [experts])
+
+  // The category chip entries of the CURRENT table (#23): raw ids in the
+  // marketplace's own order with live counts, uncategorized last.
+  var categoryChips = React.useMemo(function () {
+    if (experts === null) return []
+    return categoryChipsOf(experts)
   }, [experts])
 
   var warnings = body !== null && body !== undefined && Array.isArray(body.warnings) ? body.warnings : []
@@ -1552,6 +1685,7 @@ function MarketPage (props) {
   var clearFilters = function () {
     setQuery('')
     setFilter('all')
+    setCategory('all')
   }
 
   // null (not undefined) before the first fetch lands — cover both so the
@@ -1568,10 +1702,11 @@ function MarketPage (props) {
     })
   }, [experts, localeId])
 
-  // Whether a query or filter chip is active — the team groups' DEFAULT fold
-  // follows it (expanded under filtering so matched members are visible
-  // without a second click; collapsed on the plain browse).
-  var filteredActive = !loading && (query.trim() !== '' || filter !== 'all')
+  // Whether a query, filter chip, or category chip is active — the team
+  // groups' DEFAULT fold follows it (expanded under filtering so matched
+  // members are visible without a second click; collapsed on the plain
+  // browse).
+  var filteredActive = !loading && (query.trim() !== '' || filter !== 'all' || category !== 'all')
 
   var cards = null
   if (loading) {
@@ -1636,7 +1771,8 @@ function MarketPage (props) {
       stats !== null
         ? el('span', { className: 'wbm-census' },
             el('span', { className: 'wbm-census-item' }, t('censusExperts', { n: stats.total })),
-            el('span', { className: 'wbm-census-item' }, t('censusPlugins', { n: stats.plugins })))
+            el('span', { className: 'wbm-census-item' }, t('censusPlugins', { n: stats.plugins })),
+            el('span', { className: 'wbm-census-item' }, t('censusCategories', { n: stats.categories })))
         : null),
     // The mutating topbar (#9): path draft + apply + spinning refresh.
     el('div', { className: 'wbm-pathbar' },
@@ -1705,6 +1841,37 @@ function MarketPage (props) {
             ? el('span', { className: 'wbm-chip-count' }, String(stats[chip.stat]))
             : null)
       })),
+    // The category chip row (#23): a SECOND, orthogonal dimension — raw
+    // WorkBuddy categoryId keys with live counts, uncategorized last, hidden
+    // entirely when the table carries no category at all.
+    !loading && categoryChips.length > 0
+      ? el('div', { className: 'wbm-catrow', role: 'group', 'aria-label': t('categoryRowLabel') },
+          el('button', {
+            key: 'all',
+            className: 'wbm-chip', type: 'button',
+            'aria-pressed': category === 'all' ? 'true' : 'false',
+            'data-active': category === 'all' ? 'true' : undefined,
+            onClick: function () { setCategory('all') }
+          },
+            t('categoryAll'),
+            stats !== null
+              ? el('span', { className: 'wbm-chip-count' }, String(stats.total))
+              : null),
+          categoryChips.map(function (chip) {
+            var active = category === chip.id
+            var label = chip.id === NO_CATEGORY ? t('categoryNone') : categoryLabelOf(chip.id, localeId)
+            return el('button', {
+              key: chip.id,
+              className: 'wbm-chip', type: 'button',
+              title: chip.id === NO_CATEGORY ? undefined : chip.id,
+              'aria-pressed': active ? 'true' : 'false',
+              'data-active': active ? 'true' : undefined,
+              onClick: function () { setCategory(chip.id) }
+            },
+              el('span', { className: 'wbm-chip-label' }, label),
+              el('span', { className: 'wbm-chip-count' }, String(chip.count)))
+          }))
+      : null,
     filteredActive
       ? el('p', { className: 'wbm-matchline', role: 'status' },
           query.trim() !== ''
@@ -2203,6 +2370,12 @@ module.exports = { name: NS, inject: ['slots', 'locale'], apply: apply }
 // loader treats unknown plugin keys as inert.
 module.exports.DICTS = DICTS
 module.exports.AVATAR_EMOJI = AVATAR_EMOJI
+module.exports.NO_CATEGORY = NO_CATEGORY
+module.exports.KNOWN_CATEGORY_LABELS = KNOWN_CATEGORY_LABELS
+module.exports.categoryOf = categoryOf
+module.exports.categoryKeyOf = categoryKeyOf
+module.exports.categoryLabelOf = categoryLabelOf
+module.exports.categoryChipsOf = categoryChipsOf
 module.exports.filterExperts = filterExperts
 module.exports.localeNameOf = localeNameOf
 module.exports.localeDescriptionOf = localeDescriptionOf

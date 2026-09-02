@@ -55,10 +55,10 @@ dsh --profile web --dump-config
 
 ## 使用
 
-- **市场页**（设置 → WorkBuddy 专家）：搜索中英文均命中；过滤 chips（全部/已装/可更新/含技能/团队）；**团队插件聚合为一条可展开的组头**（成员头像堆叠 + 已装/可更新计数），单体专家照旧平铺；搜索或过滤激活时组自动展开。
+- **市场页**（设置 → WorkBuddy 专家）：搜索中英文均命中；过滤 chips（全部/已装/可更新/含技能/团队）；**分类 chips**（按 WorkBuddy 市场分组键 `categoryId` 派生：已知键本地化显示、未知键剥数字前缀示名、缺类卡片入「未分类」桶——与状态 chips、搜索三维可叠加；卡片带分类 badge，census 增「分类 N」）；**团队插件聚合为一条可展开的组头**（成员头像堆叠 + 已装/可更新计数），单体专家照旧平铺；搜索或过滤激活时组自动展开。
 - **一键全更**：存在可更新卡片时出现入口——串行逐个更新、每完成一个卡片即翻新；中途失败会停下并呈现原因，可继续更新剩余。
 - **孤儿区**：换过源目录后，装自别的源的 preset 单独列在「已安装但不在当前源」，只呈列不阻塞市场，确认后可按 id 卸载。
-- **召唤**：任意会话让模型调工具，或点输入框「召唤专家」按钮 / 输入 `@` 选专家——后两者只写指令草稿。
+- **召唤**：任意会话让模型调工具（`workbuddy_experts` 列表带每位的分类，可选 `category` 参数按 `categoryId` 原串过滤），或点输入框「召唤专家」按钮 / 输入 `@` 选专家——后两者只写指令草稿。
 
 ## 配置
 
@@ -68,7 +68,7 @@ dsh --profile web --dump-config
 
 | 路由 | 方法 | 语义 |
 |---|---|---|
-| `/api/state` | GET | `{ sourcePath, pathExists, revision, experts, orphans, warnings }`；每卡带 `installed/updatable/broken/avatarUrl`，先比对指纹、变了自动重扫 |
+| `/api/state` | GET | `{ sourcePath, pathExists, revision, experts, orphans, warnings }`；每卡带 `installed/updatable/broken/avatarUrl/category`（分类为 plugin.json `categoryId` 原串，可缺省），先比对指纹、变了自动重扫 |
 | `/api/avatar?id=` | GET | 按需流式读当前扫描表里该专家的 PNG（不拷贝）；id 过 `ID_RE`、命中扫描表、realpath 后必须仍在源根内——未知/非法/越界一律同一 404；`image/png` + `max-age=60` |
 | `/api/config` | POST | `{ sourcePath, expectedRevision? }` → 保存原串路径，返回新 state；revision 过期 409 |
 | `/api/refresh` | POST | 强制重扫，返回新 state |
